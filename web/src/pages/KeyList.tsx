@@ -365,7 +365,7 @@ export default function KeyList() {
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const loadInFlight = useRef(false);
-  const wasHidden = useRef(false);
+  // const wasHidden = useRef(false);
 
   const load = useCallback(
     async (silent = false) => {

@@ -802,11 +802,7 @@ export default function KeyForm({
             <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
               <dt className="text-[var(--muted)]">{t("keyForm.allowModelsLabel")}</dt>
               <dd className="mt-1">
-                <Chip
-                  size="sm"
-                  variant="soft"
-                  color={allowModels ? "success" : "danger"}
-                >
+                <Chip size="sm" variant="soft" color={allowModels ? "success" : "danger"}>
                   {allowModels ? t("keys.enabled") : t("keys.disabled")}
                 </Chip>
               </dd>
@@ -840,12 +836,7 @@ export default function KeyForm({
                             </strong>
                             <div className="flex max-h-48 flex-wrap gap-1.5 overflow-y-auto">
                               {reviewModelNames.map((modelName) => (
-                                <Chip
-                                  key={modelName}
-                                  size="sm"
-                                  variant="soft"
-                                  color="accent"
-                                >
+                                <Chip key={modelName} size="sm" variant="soft" color="accent">
                                   {modelName}
                                 </Chip>
                               ))}

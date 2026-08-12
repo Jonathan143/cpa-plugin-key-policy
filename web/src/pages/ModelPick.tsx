@@ -71,11 +71,9 @@ export default function ModelPick() {
   const [selected, setSelected] = useState<Set<string>>(
     () =>
       new Set([
-        ...initialModels.map(
-          (rule) => selectionKey(rule.provider, rule.group, rule.target_model),
-        ),
-        ...initialTargets.map(
-          (target) => selectionKey(target.provider, target.group, target.target_model),
+        ...initialModels.map((rule) => selectionKey(rule.provider, rule.group, rule.target_model)),
+        ...initialTargets.map((target) =>
+          selectionKey(target.provider, target.group, target.target_model),
         ),
       ]),
   );

@@ -1,34 +1,47 @@
-import { defineConfig } from "vite";
+import { fileURLToPath } from "node:url";
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { defineConfig, loadEnv } from "vite";
 import { viteSingleFile } from "vite-plugin-singlefile";
 
-// CPA base URL used by the dev-server proxy. Override with VITE_CPA_BASE.
-const cpaBase = process.env.VITE_CPA_BASE ?? "http://127.0.0.1:8317";
+const envDir = fileURLToPath(new URL("../", import.meta.url));
 
-// When hosted inside CPA, the app is served at
-// /v0/resource/plugins/cpa-key-policy/index.html. Production builds must use
-// that base so inlined asset URLs resolve. In dev we keep "/" for convenience.
-const base = process.env.VITE_HOSTED === "1"
-  ? "/v0/resource/plugins/cpa-key-policy/"
-  : "/";
+export default defineConfig(({ command, mode }) => {
+  const env = loadEnv(mode, envDir, "VITE_");
+  const cpaEnv = loadEnv(mode, envDir, "CPA_");
 
-export default defineConfig({
-  base,
-  plugins: [react(), viteSingleFile()],
-  // Single-file build: inline everything into index.html.
-  build: {
-    assetsInlineLimit: 100000000,
-    cssCodeSplit: false,
-    rollupOptions: {
-      output: { inlineDynamicImports: true },
+  // Shell variables take precedence over values from the project-root .env.
+  const cpaBase = process.env.VITE_CPA_BASE ?? env.VITE_CPA_BASE ?? "http://127.0.0.1:8317";
+  const hosted = process.env.VITE_HOSTED ?? env.VITE_HOSTED;
+  const devSecretKey =
+    command === "serve" ? (process.env.CPA_SECRET_KEY ?? cpaEnv.CPA_SECRET_KEY ?? "") : "";
+
+  // When hosted inside CPA, the app is served at
+  // /v0/resource/plugins/cpa-key-policy/index.html.
+  const base = hosted === "1" ? "/v0/resource/plugins/cpa-key-policy/" : "/";
+
+  return {
+    envDir,
+    // Make the root .env management key available only to the local dev
+    // server. Production/hosted builds always receive an empty value so the
+    // secret can never be embedded in the generated plugin HTML.
+    define: {
+      "import.meta.env.CPA_SECRET_KEY": JSON.stringify(devSecretKey),
     },
-  },
-  server: {
-    port: 5174,
-    proxy: {
-      // Proxy management API calls to CPA during development to avoid CORS.
-      "/v0/management": { target: cpaBase, changeOrigin: true },
-      "/v1/models": { target: cpaBase, changeOrigin: true },
+    plugins: [
+      react(),
+      tailwindcss(),
+      // The plugin applies the Vite 8/Rolldown single-file build settings.
+      // Its default base is "./", so restore the hosted/development base here.
+      viteSingleFile({ overrideConfig: { base } }),
+    ],
+    server: {
+      port: 5174,
+      proxy: {
+        // Proxy management API calls to CPA during development to avoid CORS.
+        "/v0/management": { target: cpaBase, changeOrigin: true },
+        "/v1/models": { target: cpaBase, changeOrigin: true },
+      },
     },
-  },
+  };
 });

@@ -1,599 +1,677 @@
-import { useEffect, useState, useCallback } from "react";
-import { useNavigate, useParams, useLocation } from "react-router-dom";
+import { Button, Chip, Input, ListBox, Select, Switch, toast } from "@heroui/react";
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowUp,
+  ChevronDown,
+  ChevronRight,
+  GripVertical,
+  Network,
+  Pencil,
+  Plus,
+  Route,
+  ShieldCheck,
+  Trash2,
+} from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
+import {
+  classifyPreview,
+  deleteAlias,
+  deleteClassifyRule,
+  fetchAliases,
+  fetchClassifyRules,
+  fetchCredentialDescriptors,
+  reorderClassifyRules,
+  upsertAlias,
+  upsertClassifyRule,
+} from "../api/mappings";
+import LoadingState from "../components/LoadingState";
 import { useT } from "../i18n";
-import type { AliasMapping, AliasTarget, ClassifyRule, ClassifyPreviewResponse, CredentialDescriptor } from "../types";
-import { fetchAliases, upsertAlias, deleteAlias, fetchClassifyRules, upsertClassifyRule, deleteClassifyRule, reorderClassifyRules, classifyPreview, fetchCredentialDescriptors } from "../api/mappings";
+import type {
+  AliasMapping,
+  AliasTarget,
+  ClassifyPreviewResponse,
+  ClassifyRule,
+  CredentialDescriptor,
+} from "../types";
+
+const fieldClass =
+  "min-h-10 w-full rounded-xl border border-[var(--field-border)] bg-[var(--field-background)] px-3 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--accent)] focus:ring-3 focus:ring-[var(--accent-soft)] disabled:bg-[var(--surface-secondary)] disabled:text-[var(--muted)]";
+const labelClass = "mb-1.5 block text-xs font-semibold text-[var(--muted)]";
+
+function aliasTargetKey(target: AliasTarget): string {
+  return `${target.provider}|${target.group ?? ""}|${target.target_model}`;
+}
 
 export default function Mapping() {
   const t = useT();
-  const loc = useLocation();
-  const [tab, setTab] = useState<"alias" | "classify">("alias");
-
-  // Pick up returned state (new targets from ModelPick, etc.)
-  useEffect(() => {
-    if (loc.state?.mappingTab) setTab(loc.state.mappingTab);
-  }, [loc.state]);
-
+  const location = useLocation();
+  const [tab, setTab] = useState<"alias" | "classify">(
+    (location.state as { mappingTab?: "alias" | "classify" } | null)?.mappingTab ?? "alias",
+  );
   return (
-    <div className="map-page">
-      <div className="map-page-head">
-        <h1>{t("mapping.title")}</h1>
-      </div>
-      <div className="map-tabs">
-        <button className={"map-tab" + (tab === "alias" ? " active" : "")} onClick={() => setTab("alias")}>
+    <section className="grid gap-6">
+      <header>
+        <p className="m-0 text-[10px] font-bold tracking-[.14em] text-[var(--accent-soft-foreground)]">
+          ROUTING CONTROL
+        </p>
+        <h1 className="mb-1 mt-0.5 text-3xl font-bold tracking-tight">{t("mapping.title")}</h1>
+        <p className="m-0 text-sm text-[var(--muted)]">{t("app.mappingSubtitle")}</p>
+      </header>
+      <div className="inline-flex w-fit rounded-xl bg-[var(--surface-secondary)] p-1">
+        <button
+          className={`rounded-lg px-4 py-2 text-xs ${tab === "alias" ? "bg-[var(--surface)] font-semibold shadow-sm" : "text-[var(--muted)]"}`}
+          onClick={() => setTab("alias")}
+        >
           {t("mapping.aliasTab")}
         </button>
-        <button className={"map-tab" + (tab === "classify" ? " active" : "")} onClick={() => setTab("classify")}>
+        <button
+          className={`rounded-lg px-4 py-2 text-xs ${tab === "classify" ? "bg-[var(--surface)] font-semibold shadow-sm" : "text-[var(--muted)]"}`}
+          onClick={() => setTab("classify")}
+        >
           {t("mapping.classifyTab")}
         </button>
       </div>
-      {tab === "alias" ? <AliasListTab /> : <ClassifyTab />}
-    </div>
+      {tab === "alias" ? <AliasList /> : <RuleList />}
+    </section>
   );
 }
 
-// --- Alias List Tab ---
-
-function AliasListTab() {
+function AliasList() {
   const t = useT();
   const nav = useNavigate();
-  const [aliases, setAliases] = useState<AliasMapping[]>([]);
+  const [items, setItems] = useState<AliasMapping[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
   const load = useCallback(async () => {
     setLoading(true);
+    setError("");
     try {
-      const list = await fetchAliases();
-      setAliases(list);
-    } catch (e: unknown) {
-      setError(String(e));
+      setItems(await fetchAliases());
+    } catch (caught) {
+      setError(String(caught));
     } finally {
       setLoading(false);
     }
   }, []);
-
-  useEffect(() => { void load(); }, [load]);
-
-  const handleDelete = async (aliasName: string) => {
+  useEffect(() => {
+    void load();
+  }, [load]);
+  const remove = async (name: string) => {
     try {
-      await deleteAlias(aliasName);
+      await deleteAlias(name);
+      toast.success(t("app.aliasDeleted"));
       await load();
-    } catch (e: unknown) {
-      setError(String(e));
+    } catch (caught) {
+      setError(String(caught));
     }
   };
-
   return (
-    <>
-      <div className="map-toolbar">
-        <button className="btn primary" onClick={() => nav("/mapping/alias/new")}>
-          + {t("mapping.newAlias")}
-        </button>
+    <div className="grid gap-3">
+      <div className="flex justify-end">
+        <Button variant="primary" onPress={() => nav("/mapping/alias/new")}>
+          <Plus size={16} />
+          {t("mapping.newAlias")}
+        </Button>
       </div>
-      {error && <div className="error">{error}</div>}
-      {loading ? (
-        <div className="muted" style={{ padding: 20 }}>{t("keys.loading") || "Loading..."}</div>
-      ) : aliases.length === 0 ? (
-        <div className="muted" style={{ padding: 20 }}>No aliases</div>
-      ) : (
-        <div className="alias-grid">
-          {aliases.map((a) => (
-            <AliasCard key={a.alias} alias={a} onDelete={handleDelete} onEdit={(name) => nav(`/mapping/alias/${encodeURIComponent(name)}`)} />
-          ))}
+      {error && (
+        <div className="rounded-xl bg-[var(--danger-soft)] p-3 text-xs text-[var(--danger)]">
+          {error}
         </div>
       )}
-    </>
-  );
-}
-
-function AliasCard({ alias, onDelete, onEdit }: { alias: AliasMapping; onDelete: (n: string) => void; onEdit: (n: string) => void }) {
-  const t = useT();
-  const [refCount] = useState<number | null>(null);
-  // refCount would come from a separate API call or be included in the list response.
-  // For now, show "unreferenced" as placeholder.
-  return (
-    <div className="alias-card">
-      <div className="alias-card-head">
-        <span className="alias-card-name">{alias.alias}</span>
-        <span className="alias-dispatch-badge">
-          {alias.dispatch === "priority" ? t("mapping.alias.priority") : t("mapping.alias.roundRobin")}
-        </span>
-      </div>
-      <div className="alias-targets">
-        {alias.targets.slice(0, 3).map((tgt, i) => (
-          <div key={i} className="alias-target-row">
-            <span>{tgt.provider} · {tgt.target_model}</span>
-            {tgt.group && <span className="alias-target-group">{tgt.group}</span>}
-          </div>
-        ))}
-        {alias.targets.length > 3 && (
-          <div className="alias-target-row" style={{ opacity: 0.6 }}>
-            {t("mapping.moreTargets", { n: alias.targets.length - 3 })}
-          </div>
-        )}
-      </div>
-      <div className="alias-pricing">
-        {alias.billing_mode === "per_call" ? (
-          <>{t("mapping.alias.perCallUnit")} ${alias.per_call_usd ?? 0}/{t("mapping.alias.perCallUnit")}</>
+      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-sm">
+        {loading ? (
+          <LoadingState label={t("keys.loading")} variant="list" rows={4} />
+        ) : items.length === 0 ? (
+          <div className="p-10 text-center text-sm text-[var(--muted)]">{t("app.noAliases")}</div>
         ) : (
-          <>{t("mapping.alias.input")} ${alias.input_price_per_million ?? 0} / {t("mapping.alias.output")} ${alias.output_price_per_million ?? 0} / {t("mapping.alias.cache")} ${alias.cache_read_price_per_million ?? 0} {t("mapping.alias.perMillion")}</>
+          <div className="w-full overflow-x-auto">
+            <table className="w-full border-collapse text-left">
+              <thead>
+                <tr className="bg-[var(--surface-secondary)] text-[10px] uppercase text-[var(--muted)] [&>th]:px-4 [&>th]:py-3">
+                  <th>{t("mapping.alias.name")}</th>
+                  <th>{t("mapping.alias.targets")}</th>
+                  <th>{t("mapping.alias.dispatch")}</th>
+                  <th>{t("mapping.alias.billing")}</th>
+                  <th className="text-right">{t("keys.colActions")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((alias) => (
+                  <tr
+                    key={alias.alias}
+                    className="text-xs [&>td]:border-t [&>td]:border-[var(--separator)] [&>td]:px-4 [&>td]:py-3"
+                  >
+                    <td>
+                      <code className="font-semibold">{alias.alias}</code>
+                    </td>
+                    <td>
+                      <div className="flex max-w-lg flex-wrap gap-1.5">
+                        {alias.targets.slice(0, 3).map((target) => (
+                          <span
+                            key={aliasTargetKey(target)}
+                            className="rounded-lg bg-[var(--surface-secondary)] px-2 py-1 text-[10px] text-[var(--muted)]"
+                          >
+                            {target.provider} · {target.target_model}
+                            {target.group ? ` · ${target.group}` : ""}
+                          </span>
+                        ))}
+                        {alias.targets.length > 3 && (
+                          <span className="rounded-lg bg-[var(--surface-secondary)] px-2 py-1 text-[10px] text-[var(--muted)]">
+                            +{alias.targets.length - 3}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      <Chip size="sm" variant="soft" color="accent">
+                        {alias.dispatch === "priority"
+                          ? t("mapping.alias.priority")
+                          : t("mapping.alias.roundRobin")}
+                      </Chip>
+                    </td>
+                    <td className="text-[var(--muted)]">
+                      {alias.billing_mode === "per_call"
+                        ? `${alias.per_call_usd ?? 0} / ${t("mapping.alias.perCallUnit")}`
+                        : `${t("mapping.alias.input")} ${alias.input_price_per_million ?? 0} · ${t("mapping.alias.output")} ${alias.output_price_per_million ?? 0}`}
+                    </td>
+                    <td>
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          isIconOnly
+                          size="sm"
+                          variant="ghost"
+                          onPress={() => nav(`/mapping/alias/${encodeURIComponent(alias.alias)}`)}
+                          aria-label={t("mapping.edit")}
+                        >
+                          <Pencil size={15} />
+                        </Button>
+                        <Button
+                          isIconOnly
+                          size="sm"
+                          variant="danger-soft"
+                          onPress={() => remove(alias.alias)}
+                          aria-label={t("mapping.delete")}
+                        >
+                          <Trash2 size={15} />
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
-      </div>
-      <div className={"alias-refs" + (refCount === 0 ? " zero" : "")}>
-        {refCount && refCount > 0 ? t("mapping.refs", { n: refCount }) : t("mapping.unreferenced")}
-      </div>
-      <div className="alias-actions">
-        <button className="btn sm" onClick={() => onEdit(alias.alias)}>{t("mapping.edit")}</button>
-        <button
-          className="btn sm danger-outline"
-          disabled={refCount !== null && refCount > 0}
-          title={refCount && refCount > 0 ? t("mapping.deleteBlocked", { n: refCount }) : ""}
-          onClick={() => onDelete(alias.alias)}
-        >
-          {t("mapping.delete")}
-        </button>
       </div>
     </div>
   );
 }
 
-// --- Classify Tab ---
-
-function ClassifyTab() {
+function RuleList() {
   const t = useT();
   const nav = useNavigate();
   const [rules, setRules] = useState<ClassifyRule[]>([]);
+  const [preview, setPreview] = useState<ClassifyPreviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [previewData, setPreviewData] = useState<ClassifyPreviewResponse | null>(null);
-
+  const [dragged, setDragged] = useState<number | null>(null);
   const load = useCallback(async () => {
     setLoading(true);
+    setError("");
     try {
-      const [list, descriptors] = await Promise.all([
+      const [items, descriptors] = await Promise.all([
         fetchClassifyRules(),
         fetchCredentialDescriptors().catch(() => [] as CredentialDescriptor[]),
       ]);
-      setRules(list);
-      // Evaluate the current rules against real credential descriptors so
-      // each rule card shows the true match count + file list.
-      const preview = await classifyPreview(descriptors).catch(() => null as ClassifyPreviewResponse | null);
-      setPreviewData(preview);
-    } catch (e: unknown) {
-      setError(String(e));
+      setRules(items);
+      setPreview(await classifyPreview(descriptors).catch(() => null));
+    } catch (caught) {
+      setError(String(caught));
     } finally {
       setLoading(false);
     }
   }, []);
-
-  useEffect(() => { void load(); }, [load]);
-
-  const handleReorder = async (names: string[]) => {
+  useEffect(() => {
+    void load();
+  }, [load]);
+  const applyOrder = async (ordered: ClassifyRule[]) => {
+    setRules(ordered);
     try {
-      await reorderClassifyRules(names);
+      await reorderClassifyRules(ordered.map((rule) => rule.name));
+    } catch (caught) {
+      setError(String(caught));
       await load();
-    } catch (e: unknown) {
-      setError(String(e));
     }
   };
-
-  const handleDelete = async (name: string) => {
+  const move = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= rules.length) return;
+    const next = [...rules];
+    [next[index], next[target]] = [next[target], next[index]];
+    void applyOrder(next);
+  };
+  const remove = async (name: string) => {
     try {
       await deleteClassifyRule(name);
+      toast.success(t("app.ruleDeleted"));
       await load();
-    } catch (e: unknown) {
-      setError(String(e));
+    } catch (caught) {
+      setError(String(caught));
     }
   };
-
-  const moveRule = (idx: number, dir: -1 | 1) => {
-    const newOrder = [...rules];
-    const target = idx + dir;
-    if (target < 0 || target >= newOrder.length) return;
-    [newOrder[idx], newOrder[target]] = [newOrder[target], newOrder[idx]];
-    void handleReorder(newOrder.map((r) => r.name));
-  };
-
   return (
-    <>
-      <div className="map-toolbar">
-        <button className="btn primary" onClick={() => nav("/mapping/rule/new")}>
-          + {t("mapping.newRule")}
-        </button>
+    <div className="grid gap-3">
+      <div className="flex justify-end">
+        <Button variant="primary" onPress={() => nav("/mapping/rule/new")}>
+          <Plus size={16} />
+          {t("mapping.newRule")}
+        </Button>
       </div>
-      {error && <div className="error">{error}</div>}
-      {loading ? (
-        <div className="muted" style={{ padding: 20 }}>Loading...</div>
-      ) : (
-        <div className="rule-list">
-          {/* Built-in rules (read-only) */}
-          <div className="rule-builtin-card">
-            <h3>{t("mapping.rule.builtin")} ({t("mapping.rule.builtinReadOnly")})</h3>
-            <div className="rule-builtin-row">
-              <span className="info-icon">ⓘ</span>
-              plan_type → {`<detected>`}
-            </div>
-            <div className="rule-builtin-row">
-              <span className="info-icon">ⓘ</span>
-              tier → {`<detected>`}
-            </div>
-            <div className="rule-builtin-desc">{t("mapping.rule.builtinDesc")}</div>
-          </div>
-
-          {/* Custom rules */}
-          <div className="section-label" style={{ marginTop: 16 }}>{t("mapping.rule.custom")}</div>
-          {rules.length === 0 ? (
-            <div className="muted" style={{ padding: 20 }}>No custom rules</div>
-          ) : (
-            rules.map((rule, idx) => (
-              <RuleCard
-                key={rule.name}
-                rule={rule}
-                idx={idx}
-                total={rules.length}
-                onMoveUp={() => moveRule(idx, -1)}
-                onMoveDown={() => moveRule(idx, 1)}
-                onEdit={() => nav(`/mapping/rule/${encodeURIComponent(rule.name)}`)}
-                onDelete={() => handleDelete(rule.name)}
-                previewData={previewData}
-              />
-            ))
-          )}
+      {error && (
+        <div className="rounded-xl bg-[var(--danger-soft)] p-3 text-xs text-[var(--danger)]">
+          {error}
         </div>
       )}
-    </>
-  );
-}
-
-function RuleCard({
-  rule, idx, total, onMoveUp, onMoveDown, onEdit, onDelete, previewData,
-}: {
-  rule: ClassifyRule;
-  idx: number;
-  total: number;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
-  previewData: ClassifyPreviewResponse | null;
-}) {
-  const t = useT();
-  const [expanded, setExpanded] = useState(false);
-  const [matchCount, setMatchCount] = useState<number | null>(null);
-  const [matchedFiles, setMatchedFiles] = useState<string[]>([]);
-  const [page, setPage] = useState(0);
-  const pageSize = 50;
-
-  // Compute the match count + matched file list up front from previewData
-  // (fetched by ClassifyTab once the rules + descriptors load). The badge
-  // shows the count even when collapsed, so this must not be gated on
-  // `expanded`. Re-run whenever the preview or this rule's target group
-  // changes; the matchedFiles list drives the expanded detail pagination.
-  useEffect(() => {
-    const files = previewData?.groups[rule.group.toLowerCase()] ?? [];
-    setMatchCount(files.length);
-    setMatchedFiles(files);
-  }, [previewData, rule.group]);
-
-  const pageCount = Math.ceil(matchedFiles.length / pageSize);
-  const pageFiles = matchedFiles.slice(page * pageSize, (page + 1) * pageSize);
-
-  return (
-    <div className="rule-card">
-      <div className="rule-card-head">
-        <div className="rule-card-order">
-          <button onClick={onMoveUp} disabled={idx === 0} title={t("mapping.rule.moveUp")}>↑</button>
-          <button onClick={onMoveDown} disabled={idx === total - 1} title={t("mapping.rule.moveDown")}>↓</button>
-        </div>
-        <div className="rule-card-main" onClick={() => setExpanded(!expanded)} style={{ cursor: "pointer" }}>
-          <div className="rule-card-name">{rule.name}</div>
-          <div className="rule-card-sub">{rule.field}: {rule.pattern} → {rule.group}</div>
-        </div>
-        <div className="rule-card-right">
-          <span className={"rule-match-badge" + (matchCount === 0 ? " zero" : "")}>
-            {matchCount !== null
-              ? (matchCount > 0 ? t("mapping.rule.matchCount", { n: matchCount }) : t("mapping.rule.matchCountZero"))
-              : "..."}
+      <article className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm">
+        <div className="mb-3 flex items-center gap-2">
+          <span className="grid size-8 place-items-center rounded-lg bg-cyan-500/10 text-cyan-500">
+            <ShieldCheck size={16} />
           </span>
-          <label className="switch" title={t("mapping.rule.enabled")}>
-            <input type="checkbox" checked={rule.enabled} readOnly />
-            <span className="track"><span className="thumb" /></span>
-          </label>
-          <button className="btn sm" onClick={onEdit}>{t("mapping.edit")}</button>
-          <button className="btn sm danger-outline" onClick={onDelete}>{t("mapping.delete")}</button>
-        </div>
-      </div>
-      {expanded && (
-        <div className="rule-detail">
-          <div className="rule-detail-files">
-            {pageFiles.length === 0 ? (
-              <div className="muted" style={{ padding: 8 }}>{t("mapping.rule.noFiles")}</div>
-            ) : (
-              pageFiles.map((f, i) => (
-                <div key={i} className="rule-detail-file">
-                  <span>{f}</span>
-                </div>
-              ))
-            )}
+          <div>
+            <h2 className="text-sm font-bold">{t("mapping.rule.builtin")}</h2>
+            <p className="text-[10px] text-[var(--muted)]">{t("mapping.rule.builtinReadOnly")}</p>
           </div>
-          {pageCount > 1 && (
-            <div className="rule-pager">
-              <button onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0}>
-                {t("mapping.rule.prevPage")}
-              </button>
-              <span className="page-info">{t("mapping.rule.pageInfo", { cur: page + 1, total: pageCount })}</span>
-              <button onClick={() => setPage(Math.min(pageCount - 1, page + 1))} disabled={page >= pageCount - 1}>
-                {t("mapping.rule.nextPage")}
-              </button>
-            </div>
-          )}
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <code className="rounded-xl bg-[var(--surface-secondary)] p-3 text-xs">
+            plan_type → &lt;detected&gt;
+          </code>
+          <code className="rounded-xl bg-[var(--surface-secondary)] p-3 text-xs">
+            tier → &lt;detected&gt;
+          </code>
+        </div>
+        <p className="mb-0 mt-3 text-[11px] text-[var(--muted)]">{t("mapping.rule.builtinDesc")}</p>
+      </article>
+      {loading ? (
+        <LoadingState
+          label={t("keys.loading")}
+          variant="list"
+          rows={3}
+          className="rounded-2xl border border-[var(--border)] shadow-sm"
+        />
+      ) : rules.length === 0 ? (
+        <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-10 text-center text-sm text-[var(--muted)]">
+          {t("app.noRules")}
+        </div>
+      ) : (
+        <div className="grid gap-2">
+          {rules.map((rule, index) => (
+            <RuleRow
+              key={rule.name}
+              rule={rule}
+              index={index}
+              total={rules.length}
+              preview={preview}
+              onMove={(direction) => move(index, direction)}
+              onEdit={() => nav(`/mapping/rule/${encodeURIComponent(rule.name)}`)}
+              onDelete={() => remove(rule.name)}
+              draggable
+              onDragStart={() => setDragged(index)}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={() => {
+                if (dragged === null || dragged === index) return;
+                const next = [...rules];
+                const [item] = next.splice(dragged, 1);
+                next.splice(index, 0, item);
+                setDragged(null);
+                void applyOrder(next);
+              }}
+            />
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-// --- Alias Edit Form ---
+function RuleRow({
+  rule,
+  index,
+  total,
+  preview,
+  onMove,
+  onEdit,
+  onDelete,
+  ...dragProps
+}: {
+  rule: ClassifyRule;
+  index: number;
+  total: number;
+  preview: ClassifyPreviewResponse | null;
+  onMove: (direction: -1 | 1) => void;
+  onEdit: () => void;
+  onDelete: () => void;
+} & React.HTMLAttributes<HTMLElement>) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(false);
+  const matches = preview?.groups[rule.group.toLowerCase()] ?? [];
+  return (
+    <article
+      {...dragProps}
+      className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-sm"
+    >
+      <div className="flex items-center gap-2 p-3">
+        <GripVertical size={17} className="cursor-grab text-[var(--muted)]" />
+        <div className="flex gap-0.5">
+          <button
+            disabled={index === 0}
+            onClick={() => onMove(-1)}
+            className="grid size-7 place-items-center rounded-lg text-[var(--muted)] hover:bg-[var(--surface-secondary)] disabled:opacity-25"
+          >
+            <ArrowUp size={14} />
+          </button>
+          <button
+            disabled={index === total - 1}
+            onClick={() => onMove(1)}
+            className="grid size-7 place-items-center rounded-lg text-[var(--muted)] hover:bg-[var(--surface-secondary)] disabled:opacity-25"
+          >
+            <ArrowDown size={14} />
+          </button>
+        </div>
+        <button
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          <span className="grid min-w-0">
+            <strong className="truncate text-xs">{rule.name}</strong>
+            <code className="truncate text-[10px] text-[var(--muted)]">
+              {rule.field}: {rule.pattern} → {rule.group}
+            </code>
+          </span>
+        </button>
+        <Chip size="sm" variant="soft" color={matches.length ? "success" : "default"}>
+          {matches.length
+            ? t("mapping.rule.matchCount", { n: matches.length })
+            : t("mapping.rule.matchCountZero")}
+        </Chip>
+        <span
+          className={`size-2 rounded-full ${rule.enabled ? "bg-emerald-500" : "bg-slate-400"}`}
+        />
+        <Button isIconOnly size="sm" variant="ghost" onPress={onEdit}>
+          <Pencil size={14} />
+        </Button>
+        <Button isIconOnly size="sm" variant="danger-soft" onPress={onDelete}>
+          <Trash2 size={14} />
+        </Button>
+      </div>
+      {expanded && (
+        <div className="border-t border-[var(--separator)] p-3">
+          <div className="flex flex-wrap gap-1.5">
+            {matches.length ? (
+              matches.map((file) => (
+                <code
+                  key={file}
+                  className="rounded-lg bg-[var(--surface-secondary)] px-2 py-1 text-[10px]"
+                >
+                  {file}
+                </code>
+              ))
+            ) : (
+              <span className="text-xs text-[var(--muted)]">{t("mapping.rule.noFiles")}</span>
+            )}
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}
 
-// Survives ModelPick remounts (and React Strict Mode) better than router
-// state alone — without this, filling the alias name then picking targets
-// wipes the name when AliasEditForm remounts empty.
-const ALIAS_FORM_DRAFT_KEY = "cpa-key-policy:alias-form-draft";
-
-function readAliasFormDraft(): AliasMapping | null {
+const ALIAS_DRAFT_KEY = "cpa-key-policy:alias-form-draft";
+function readDraft(): AliasMapping | null {
   try {
-    const raw = sessionStorage.getItem(ALIAS_FORM_DRAFT_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw) as AliasMapping;
+    const value = sessionStorage.getItem(ALIAS_DRAFT_KEY);
+    return value ? (JSON.parse(value) as AliasMapping) : null;
   } catch {
     return null;
   }
 }
-
-function writeAliasFormDraft(draft: AliasMapping) {
+function writeDraft(value: AliasMapping) {
   try {
-    sessionStorage.setItem(ALIAS_FORM_DRAFT_KEY, JSON.stringify(draft));
+    sessionStorage.setItem(ALIAS_DRAFT_KEY, JSON.stringify(value));
   } catch {
-    /* private mode / quota — router state is the fallback */
+    /* optional session recovery */
   }
 }
-
-function clearAliasFormDraft() {
+function clearDraft() {
   try {
-    sessionStorage.removeItem(ALIAS_FORM_DRAFT_KEY);
+    sessionStorage.removeItem(ALIAS_DRAFT_KEY);
   } catch {
-    /* ignore */
+    /* optional session recovery */
   }
 }
 
 export function AliasEditForm() {
   const t = useT();
   const nav = useNavigate();
+  const location = useLocation();
   const { aliasName } = useParams();
-  const loc = useLocation();
   const isNew = aliasName === "new" || !aliasName;
-
-  const locState = loc.state as { draftAlias?: AliasMapping; pickedTargets?: AliasTarget[] } | null;
-  const returnDraft = locState?.draftAlias;
-  const returnTargets = locState?.pickedTargets;
-
-  const [alias, setAlias] = useState<AliasMapping>(() => {
-    const draft = returnDraft ?? readAliasFormDraft();
-    if (draft) {
-      return {
-        ...draft,
-        targets: returnTargets ?? draft.targets ?? [],
-      };
-    }
-    return {
-      alias: isNew ? "" : decodeURIComponent(aliasName ?? ""),
-      targets: [],
-      dispatch: "round-robin",
-      billing_mode: "tokens",
-      input_price_per_million: 0,
-      output_price_per_million: 0,
-      cache_read_price_per_million: 0,
-      per_call_usd: 0,
-    };
+  const returned = location.state as {
+    draftAlias?: AliasMapping;
+    pickedTargets?: AliasTarget[];
+  } | null;
+  const [value, setValue] = useState<AliasMapping>(() => {
+    const draft = returned?.draftAlias ?? readDraft();
+    return draft
+      ? { ...draft, targets: returned?.pickedTargets ?? draft.targets }
+      : {
+          alias: isNew ? "" : decodeURIComponent(aliasName ?? ""),
+          targets: [],
+          dispatch: "round-robin",
+          billing_mode: "tokens",
+          input_price_per_million: 0,
+          output_price_per_million: 0,
+          cache_read_price_per_million: 0,
+          per_call_usd: 0,
+        };
   });
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-
-  // Keep session draft in sync while editing so a picker trip never loses fields.
   useEffect(() => {
-    writeAliasFormDraft(alias);
-  }, [alias]);
-
-  // Load existing alias if editing — skip when this form already has a draft
-  // for the same alias (picker return / in-progress edit).
+    writeDraft(value);
+  }, [value]);
   useEffect(() => {
-    if (isNew) return;
-    if (returnDraft) return;
-    const name = decodeURIComponent(aliasName ?? "");
-    const session = readAliasFormDraft();
-    if (session && session.alias === name) return;
-    void fetchAliases().then((list) => {
-      const found = list.find((a) => a.alias === name);
-      if (found) setAlias(found);
-    }).catch((e: unknown) => setError(String(e)));
-  }, [aliasName, isNew, returnDraft]);
-
-  // Apply targets returned from ModelPick (draft fields come from session/router).
+    if (isNew || returned?.draftAlias || readDraft()?.alias === decodeURIComponent(aliasName ?? ""))
+      return;
+    void fetchAliases()
+      .then((items) => {
+        const found = items.find((item) => item.alias === decodeURIComponent(aliasName ?? ""));
+        if (found) setValue(found);
+      })
+      .catch((caught) => setError(String(caught)));
+  }, [aliasName, isNew, returned?.draftAlias]);
   useEffect(() => {
-    if (!returnTargets) return;
-    setAlias((prev) => {
-      const base = returnDraft ?? prev;
-      return { ...base, targets: returnTargets };
-    });
-  }, [returnTargets, returnDraft]);
-
-  const leaveForm = (toMapping = true) => {
-    clearAliasFormDraft();
-    if (toMapping) nav("/mapping", { state: { mappingTab: "alias" } });
+    const pickedTargets = returned?.pickedTargets;
+    if (!pickedTargets) return;
+    setValue((current) => ({
+      ...(returned?.draftAlias ?? current),
+      targets: pickedTargets,
+    }));
+  }, [returned?.pickedTargets, returned?.draftAlias]);
+  const leave = () => {
+    clearDraft();
+    nav("/mapping", { state: { mappingTab: "alias" } });
   };
-
-  const handleSave = async () => {
+  const save = async () => {
     setSaving(true);
     setError("");
     try {
-      await upsertAlias(alias);
-      leaveForm(true);
-    } catch (e: unknown) {
-      setError(String(e));
+      await upsertAlias(value);
+      clearDraft();
+      toast.success(t("app.aliasSaved"));
+      nav("/mapping", { state: { mappingTab: "alias" } });
+    } catch (caught) {
+      setError(String(caught));
     } finally {
       setSaving(false);
     }
   };
-
-  const addTarget = () => {
-    // Persist draft before leaving so name/dispatch/pricing survive the picker.
-    writeAliasFormDraft(alias);
-    const here = `/mapping/alias/${isNew ? "new" : encodeURIComponent(alias.alias || aliasName || "new")}`;
+  const pick = () => {
+    writeDraft(value);
     nav("/mapping/pick-target", {
       state: {
-        returnTo: here,
-        currentTargets: alias.targets,
-        draftAlias: alias,
+        returnTo: `/mapping/alias/${isNew ? "new" : encodeURIComponent(value.alias || aliasName || "new")}`,
+        currentTargets: value.targets,
+        draftAlias: value,
       },
     });
   };
-
-  const removeTarget = (idx: number) => {
-    setAlias((prev) => ({ ...prev, targets: prev.targets.filter((_, i) => i !== idx) }));
-  };
-
   return (
-    <div className="map-form-page">
-      <div className="map-form-card">
-        <div className="map-form-head">
-          <a className="back-link" onClick={() => leaveForm(true)}>
-            ← {t("mapping.back")}
-          </a>
-          <h1>{isNew ? t("mapping.alias.newTitle") : t("mapping.alias.editTitle")}</h1>
-        </div>
-        <div className="map-form-row">
-          <label>{t("mapping.alias.name")}</label>
-          <input
-            className="mono"
-            value={alias.alias}
-            onChange={(e) => setAlias({ ...alias, alias: e.target.value })}
-            disabled={!isNew}
-            placeholder="my-alias"
-          />
-        </div>
-        <div className="map-form-row">
-          <label>{t("mapping.alias.dispatch")}</label>
-          <div className="map-dispatch-seg" role="group" aria-label={t("mapping.alias.dispatch")}>
+    <EditorShell
+      title={isNew ? t("mapping.alias.newTitle") : t("mapping.alias.editTitle")}
+      onBack={leave}
+    >
+      <div>
+        <label className={labelClass}>{t("mapping.alias.name")}</label>
+        <Input
+          value={value.alias}
+          onChange={(event) => setValue({ ...value, alias: event.target.value })}
+          disabled={!isNew}
+          className="font-mono"
+          fullWidth
+        />
+      </div>
+      <div>
+        <label className={labelClass}>{t("mapping.alias.dispatch")}</label>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {(["round-robin", "priority"] as const).map((mode) => (
             <button
+              key={mode}
               type="button"
-              className={"map-dispatch-btn" + (alias.dispatch === "round-robin" ? " active" : "")}
-              onClick={() => setAlias({ ...alias, dispatch: "round-robin" })}
+              onClick={() => setValue({ ...value, dispatch: mode })}
+              className={`rounded-xl border p-3 text-left ${value.dispatch === mode ? "border-indigo-500/30 bg-[var(--accent-soft)]" : "border-[var(--border)]"}`}
             >
-              <span className="map-dispatch-title">{t("mapping.alias.roundRobin")}</span>
-              <span className="map-dispatch-desc">{t("mapping.alias.roundRobinDesc")}</span>
+              <strong className="block text-xs">
+                {mode === "priority" ? t("mapping.alias.priority") : t("mapping.alias.roundRobin")}
+              </strong>
+              <span className="mt-1 block text-[10px] text-[var(--muted)]">
+                {mode === "priority"
+                  ? t("mapping.alias.priorityDesc")
+                  : t("mapping.alias.roundRobinDesc")}
+              </span>
             </button>
-            <button
-              type="button"
-              className={"map-dispatch-btn" + (alias.dispatch === "priority" ? " active" : "")}
-              onClick={() => setAlias({ ...alias, dispatch: "priority" })}
-            >
-              <span className="map-dispatch-title">{t("mapping.alias.priority")}</span>
-              <span className="map-dispatch-desc">{t("mapping.alias.priorityDesc")}</span>
-            </button>
-          </div>
-        </div>
-        <div className="map-form-row">
-          <label>{t("mapping.alias.targets")}</label>
-          <div className="map-form-targets">
-            {alias.targets.map((tgt, i) => (
-              <div key={i} className="map-form-target-row">
-                <span className="mono">{tgt.provider} · {tgt.target_model} {tgt.group ? `· ${tgt.group}` : ""}</span>
-                <button className="remove-btn" onClick={() => removeTarget(i)}>×</button>
-              </div>
-            ))}
-          </div>
-          <button className="btn" onClick={addTarget}>+ {t("mapping.alias.addTarget")}</button>
-        </div>
-        <div className="map-form-row">
-          <label>{t("mapping.alias.billing")}</label>
-          <label className="switch" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={alias.billing_mode === "per_call"}
-              onChange={(e) => setAlias({ ...alias, billing_mode: e.target.checked ? "per_call" : "tokens" })}
-            />
-            <span className="track"><span className="thumb" /></span>
-            <span>{alias.billing_mode === "per_call" ? t("mapping.alias.perCall") : t("mapping.alias.tokens")}</span>
-          </label>
-        </div>
-        {alias.billing_mode === "tokens" ? (
-          <>
-            <div className="map-form-row">
-              <label>{t("mapping.alias.input")} ($/1M)</label>
-              <input
-                className="mono"
-                type="number"
-                step="0.01"
-                value={alias.input_price_per_million ?? 0}
-                onChange={(e) => setAlias({ ...alias, input_price_per_million: parseFloat(e.target.value) || 0 })}
-              />
-            </div>
-            <div className="map-form-row">
-              <label>{t("mapping.alias.output")} ($/1M)</label>
-              <input
-                className="mono"
-                type="number"
-                step="0.01"
-                value={alias.output_price_per_million ?? 0}
-                onChange={(e) => setAlias({ ...alias, output_price_per_million: parseFloat(e.target.value) || 0 })}
-              />
-            </div>
-            <div className="map-form-row">
-              <label>{t("mapping.alias.cache")} ($/1M)</label>
-              <input
-                className="mono"
-                type="number"
-                step="0.01"
-                value={alias.cache_read_price_per_million ?? 0}
-                onChange={(e) => setAlias({ ...alias, cache_read_price_per_million: parseFloat(e.target.value) || 0 })}
-              />
-            </div>
-          </>
-        ) : (
-          <div className="map-form-row">
-            <label>{t("mapping.alias.perCallUnit")} ($/{t("mapping.alias.perCallUnit")})</label>
-            <input
-              className="mono"
-              type="number"
-              step="0.01"
-              value={alias.per_call_usd ?? 0}
-              onChange={(e) => setAlias({ ...alias, per_call_usd: parseFloat(e.target.value) || 0 })}
-            />
-          </div>
-        )}
-        {error && <div className="error">{error}</div>}
-        <div className="map-form-foot">
-          <button className="btn primary" onClick={handleSave} disabled={saving}>
-            {saving ? "..." : t("mapping.save")}
-          </button>
-          <button className="btn" onClick={() => leaveForm(true)}>
-            {t("mapping.cancel")}
-          </button>
+          ))}
         </div>
       </div>
-    </div>
+      <div>
+        <label className={labelClass}>{t("mapping.alias.targets")}</label>
+        <div className="mb-2 grid gap-2">
+          {value.targets.map((target, index) => (
+            <div
+              key={aliasTargetKey(target)}
+              className="flex items-center justify-between rounded-xl bg-[var(--surface-secondary)] px-3 py-2"
+            >
+              <code className="text-[11px]">
+                {target.provider} · {target.target_model}
+                {target.group ? ` · ${target.group}` : ""}
+              </code>
+              <button
+                onClick={() =>
+                  setValue({
+                    ...value,
+                    targets: value.targets.filter((_, itemIndex) => itemIndex !== index),
+                  })
+                }
+                className="text-[var(--muted)] hover:text-[var(--danger)]"
+              >
+                <Trash2 size={15} />
+              </button>
+            </div>
+          ))}
+        </div>
+        <Button variant="secondary" onPress={pick}>
+          <Plus size={15} />
+          {t("mapping.alias.addTarget")}
+        </Button>
+      </div>
+      <div>
+        <label className={labelClass}>{t("mapping.alias.billing")}</label>
+        <Switch
+          isSelected={value.billing_mode === "per_call"}
+          onChange={(selected) =>
+            setValue({ ...value, billing_mode: selected ? "per_call" : "tokens" })
+          }
+        >
+          <Switch.Content>
+            <Switch.Control>
+              <Switch.Thumb />
+            </Switch.Control>
+            {value.billing_mode === "per_call"
+              ? t("mapping.alias.perCall")
+              : t("mapping.alias.tokens")}
+          </Switch.Content>
+        </Switch>
+      </div>
+      {value.billing_mode === "tokens" ? (
+        <div className="grid gap-3 sm:grid-cols-3">
+          {[
+            ["input_price_per_million", t("mapping.alias.input")],
+            ["output_price_per_million", t("mapping.alias.output")],
+            ["cache_read_price_per_million", t("mapping.alias.cache")],
+          ].map(([field, label]) => (
+            <div key={field}>
+              <label className={labelClass}>{label} ($/1M)</label>
+              <input
+                className={fieldClass}
+                type="number"
+                step="0.01"
+                value={Number(value[field as keyof AliasMapping]) || 0}
+                onChange={(event) =>
+                  setValue({ ...value, [field]: Number.parseFloat(event.target.value) || 0 })
+                }
+              />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div>
+          <label className={labelClass}>{t("mapping.alias.perCallUnit")}</label>
+          <input
+            className={fieldClass}
+            type="number"
+            step="0.0001"
+            value={value.per_call_usd ?? 0}
+            onChange={(event) =>
+              setValue({ ...value, per_call_usd: Number.parseFloat(event.target.value) || 0 })
+            }
+          />
+        </div>
+      )}
+      {error && (
+        <div className="rounded-xl bg-[var(--danger-soft)] p-3 text-xs text-[var(--danger)]">
+          {error}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <Button variant="primary" onPress={save} isDisabled={saving}>
+          {saving ? "…" : t("mapping.save")}
+        </Button>
+        <Button variant="ghost" onPress={leave}>
+          {t("mapping.cancel")}
+        </Button>
+      </div>
+    </EditorShell>
   );
 }
-
-// --- Rule Edit Form ---
 
 export function RuleEditForm() {
   const t = useT();
   const nav = useNavigate();
   const { ruleName } = useParams();
   const isNew = ruleName === "new" || !ruleName;
-
   const [rule, setRule] = useState<ClassifyRule>({
     name: isNew ? "" : decodeURIComponent(ruleName),
     field: "plan_type",
@@ -602,147 +680,189 @@ export function RuleEditForm() {
     enabled: true,
   });
   const [customField, setCustomField] = useState("");
-  const [regexError, setRegexError] = useState("");
-  const [regexValid, setRegexValid] = useState(false);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-
-  // Load existing rule if editing.
   useEffect(() => {
     if (isNew) return;
-    void fetchClassifyRules().then((list) => {
-      const found = list.find((r) => r.name === decodeURIComponent(ruleName));
-      if (found) {
-        setRule(found);
-        if (["filename", "provider", "plan_type", "tier"].includes(found.field)) {
-          setCustomField("");
-        } else {
-          setCustomField(found.field);
-          setRule((prev) => ({ ...prev, field: "custom" }));
+    void fetchClassifyRules()
+      .then((items) => {
+        const found = items.find((item) => item.name === decodeURIComponent(ruleName));
+        if (found) {
+          if (["filename", "provider", "plan_type", "tier"].includes(found.field)) setRule(found);
+          else {
+            setCustomField(found.field);
+            setRule({ ...found, field: "custom" });
+          }
         }
-      }
-    }).catch((e: unknown) => setError(String(e)));
-  }, [ruleName, isNew]);
-
-  // Live regex validation.
-  useEffect(() => {
-    if (!rule.pattern) {
-      setRegexError("");
-      setRegexValid(false);
-      return;
-    }
-    try {
+      })
+      .catch((caught) => setError(String(caught)));
+  }, [isNew, ruleName]);
+  let regexError = "";
+  let regexValid = false;
+  try {
+    if (rule.pattern) {
       new RegExp(rule.pattern);
-      setRegexError("");
-      setRegexValid(true);
-    } catch (e: unknown) {
-      setRegexError(String(e).replace(/^Error: /, ""));
-      setRegexValid(false);
+      regexValid = true;
     }
-  }, [rule.pattern]);
-
-  const effectiveField = rule.field === "custom" ? customField : rule.field;
-
-  const handleSave = async () => {
+  } catch (caught) {
+    regexError = String(caught).replace(/^Error: /, "");
+  }
+  const back = () => nav("/mapping", { state: { mappingTab: "classify" } });
+  const save = async () => {
     if (!regexValid) {
       setError(t("mapping.rule.regexInvalid", { err: regexError }));
       return;
     }
     setSaving(true);
-    setError("");
     try {
-      await upsertClassifyRule({ ...rule, field: effectiveField });
-      nav("/mapping", { state: { mappingTab: "classify" } });
-    } catch (e: unknown) {
-      setError(String(e));
+      await upsertClassifyRule({
+        ...rule,
+        field: rule.field === "custom" ? customField : rule.field,
+      });
+      toast.success(t("app.ruleSaved"));
+      back();
+    } catch (caught) {
+      setError(String(caught));
     } finally {
       setSaving(false);
     }
   };
-
   return (
-    <div className="map-form-page">
-      <div className="map-form-card">
-        <div className="map-form-head">
-          <a className="back-link" onClick={() => nav("/mapping", { state: { mappingTab: "classify" } })}>
-            ← {t("mapping.back")}
-          </a>
-          <h1>{isNew ? t("mapping.rule.newTitle") : t("mapping.rule.editTitle")}</h1>
-        </div>
-        <div className="map-form-row">
-          <label>{t("mapping.rule.name")}</label>
-          <input
-            value={rule.name}
-            onChange={(e) => setRule({ ...rule, name: e.target.value })}
-            disabled={!isNew}
-            placeholder="my-rule"
-          />
-        </div>
-        <div className="map-form-row">
-          <label>{t("mapping.rule.field")}</label>
-          <select
-            value={rule.field}
-            onChange={(e) => setRule({ ...rule, field: e.target.value })}
-          >
-            <option value="filename">{t("mapping.rule.fieldFilename")}</option>
-            <option value="provider">{t("mapping.rule.fieldProvider")}</option>
-            <option value="plan_type">{t("mapping.rule.fieldPlanType")}</option>
-            <option value="tier">{t("mapping.rule.fieldTier")}</option>
-            <option value="custom">{t("mapping.rule.fieldCustom")}</option>
-          </select>
-        </div>
-        {rule.field === "custom" && (
-          <div className="map-form-row">
-            <label>{t("mapping.rule.customField")}</label>
-            <input
-              className="mono"
-              value={customField}
-              onChange={(e) => setCustomField(e.target.value)}
-              placeholder="custom_attribute_name"
-            />
-          </div>
-        )}
-        <div className="map-form-row">
-          <label>{t("mapping.rule.regex")}</label>
-          <input
-            className="mono"
-            value={rule.pattern}
-            onChange={(e) => setRule({ ...rule, pattern: e.target.value })}
-            placeholder="^team$"
-          />
-          {regexValid && <div className="regex-valid">✓ {t("mapping.rule.regexValid")}</div>}
-          {regexError && <div className="regex-invalid">{t("mapping.rule.regexInvalid", { err: regexError })}</div>}
-        </div>
-        <div className="map-form-row">
-          <label>{t("mapping.rule.group")}</label>
-          <input
-            className="mono"
-            value={rule.group}
-            onChange={(e) => setRule({ ...rule, group: e.target.value })}
-            placeholder="team"
-          />
-        </div>
-        <div className="map-form-row">
-          <label className="switch" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={rule.enabled}
-              onChange={(e) => setRule({ ...rule, enabled: e.target.checked })}
-            />
-            <span className="track"><span className="thumb" /></span>
-            <span>{t("mapping.rule.enabled")}</span>
-          </label>
-        </div>
-        {error && <div className="error">{error}</div>}
-        <div className="map-form-foot">
-          <button className="btn primary" onClick={handleSave} disabled={saving || !regexValid}>
-            {saving ? "..." : t("mapping.save")}
-          </button>
-          <button className="btn" onClick={() => nav("/mapping", { state: { mappingTab: "classify" } })}>
-            {t("mapping.cancel")}
-          </button>
-        </div>
+    <EditorShell
+      title={isNew ? t("mapping.rule.newTitle") : t("mapping.rule.editTitle")}
+      onBack={back}
+    >
+      <div>
+        <label className={labelClass}>{t("mapping.rule.name")}</label>
+        <Input
+          value={rule.name}
+          onChange={(event) => setRule({ ...rule, name: event.target.value })}
+          disabled={!isNew}
+          fullWidth
+        />
       </div>
-    </div>
+      <div>
+        <label className={labelClass}>{t("mapping.rule.field")}</label>
+        <Select
+          aria-label={t("mapping.rule.field")}
+          fullWidth
+          value={rule.field}
+          onChange={(key) => {
+            if (key !== null) setRule({ ...rule, field: String(key) });
+          }}
+        >
+          <Select.Trigger>
+            <Select.Value />
+            <Select.Indicator />
+          </Select.Trigger>
+          <Select.Popover>
+            <ListBox>
+              <ListBox.Item id="filename">{t("mapping.rule.fieldFilename")}</ListBox.Item>
+              <ListBox.Item id="provider">{t("mapping.rule.fieldProvider")}</ListBox.Item>
+              <ListBox.Item id="plan_type">{t("mapping.rule.fieldPlanType")}</ListBox.Item>
+              <ListBox.Item id="tier">{t("mapping.rule.fieldTier")}</ListBox.Item>
+              <ListBox.Item id="custom">{t("mapping.rule.fieldCustom")}</ListBox.Item>
+            </ListBox>
+          </Select.Popover>
+        </Select>
+      </div>
+      {rule.field === "custom" && (
+        <div>
+          <label className={labelClass}>{t("mapping.rule.customField")}</label>
+          <input
+            className={`${fieldClass} font-mono`}
+            value={customField}
+            onChange={(event) => setCustomField(event.target.value)}
+          />
+        </div>
+      )}
+      <div>
+        <label className={labelClass}>{t("mapping.rule.regex")}</label>
+        <input
+          className={`${fieldClass} font-mono`}
+          value={rule.pattern}
+          onChange={(event) => setRule({ ...rule, pattern: event.target.value })}
+          placeholder="^team$"
+        />
+        {regexValid && (
+          <p className="mt-1 text-[10px] text-emerald-500">✓ {t("mapping.rule.regexValid")}</p>
+        )}
+        {regexError && (
+          <p className="mt-1 text-[10px] text-[var(--danger)]">
+            {t("mapping.rule.regexInvalid", { err: regexError })}
+          </p>
+        )}
+      </div>
+      <div>
+        <label className={labelClass}>{t("mapping.rule.group")}</label>
+        <input
+          className={`${fieldClass} font-mono`}
+          value={rule.group}
+          onChange={(event) => setRule({ ...rule, group: event.target.value })}
+          placeholder="team"
+        />
+      </div>
+      <Switch
+        isSelected={rule.enabled}
+        onChange={(selected) => setRule({ ...rule, enabled: selected })}
+      >
+        <Switch.Content>
+          <Switch.Control>
+            <Switch.Thumb />
+          </Switch.Control>
+
+          {t("mapping.rule.enabled")}
+        </Switch.Content>
+      </Switch>
+      {error && (
+        <div className="rounded-xl bg-[var(--danger-soft)] p-3 text-xs text-[var(--danger)]">
+          {error}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <Button variant="primary" onPress={save} isDisabled={saving || !regexValid}>
+          {saving ? "…" : t("mapping.save")}
+        </Button>
+        <Button variant="ghost" onPress={back}>
+          {t("mapping.cancel")}
+        </Button>
+      </div>
+    </EditorShell>
+  );
+}
+
+function EditorShell({
+  title,
+  onBack,
+  children,
+}: {
+  title: string;
+  onBack: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="mx-auto grid max-w-3xl gap-5">
+      <header className="flex items-center gap-3">
+        <button
+          onClick={onBack}
+          className="grid size-9 place-items-center rounded-xl border border-[var(--border)] text-[var(--muted)] hover:bg-[var(--surface-secondary)]"
+        >
+          <ArrowLeft size={18} />
+        </button>
+        <div>
+          <p className="m-0 text-[10px] font-bold tracking-[.14em] text-[var(--accent-soft-foreground)]">
+            MAPPING EDITOR
+          </p>
+          <h1 className="mt-0.5 text-2xl font-bold tracking-tight">{title}</h1>
+        </div>
+      </header>
+      <div className="grid gap-5 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm sm:p-6">
+        {children}
+      </div>
+      <div className="sr-only">
+        <Network />
+        <Route />
+      </div>
+    </section>
   );
 }

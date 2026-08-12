@@ -94,11 +94,7 @@ function readCache(): PriceTable | null {
     const raw = sessionStorage.getItem(CACHE_KEY);
     if (!raw) return null;
     const env = JSON.parse(raw) as CacheEnvelope;
-    if (
-      !env ||
-      typeof env.fetchedAt !== "number" ||
-      !Array.isArray(env.table)
-    ) {
+    if (!env || typeof env.fetchedAt !== "number" || !Array.isArray(env.table)) {
       return null;
     }
     if (Date.now() - env.fetchedAt > TTL_MS) return null;

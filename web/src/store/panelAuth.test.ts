@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   _resetKeyCache,
-  obfuscateData,
   deobfuscateData,
-  readPanelAuth,
+  obfuscateData,
   type PanelAuth,
+  readPanelAuth,
 } from "./panelAuth";
 
 const STORAGE_KEY = "cli-proxy-auth";

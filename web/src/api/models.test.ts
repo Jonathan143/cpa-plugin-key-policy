@@ -1,12 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  normalizeCatalog,
-  groupByCatalog,
-  readPlanType,
-  filterByConfigured,
-  isClassifyGroup,
-  formatTierLabel,
   CLASSIFY_GROUP_PREFIX,
+  filterByConfigured,
+  formatTierLabel,
+  groupByCatalog,
+  isClassifyGroup,
+  normalizeCatalog,
+  readPlanType,
 } from "./models";
 
 describe("normalizeCatalog", () => {
@@ -32,28 +32,17 @@ describe("normalizeCatalog", () => {
     const out = normalizeCatalog([
       {
         provider: "claude",
-        models: [
-          { model: "claude-sonnet-4" },
-          { id: "claude-opus-4" },
-          { name: "claude-haiku" },
-        ],
+        models: [{ model: "claude-sonnet-4" }, { id: "claude-opus-4" }, { name: "claude-haiku" }],
       },
     ]);
-    expect(out.map((o) => o.model)).toEqual([
-      "claude-haiku",
-      "claude-opus-4",
-      "claude-sonnet-4",
-    ]);
+    expect(out.map((o) => o.model)).toEqual(["claude-haiku", "claude-opus-4", "claude-sonnet-4"]);
   });
 
   it("handles object-map models", () => {
     const out = normalizeCatalog([
       { provider: "gemini", models: { "gemini-2.5": {}, "gemini-pro": {} } },
     ]);
-    expect(out.map((o) => o.model).sort()).toEqual([
-      "gemini-2.5",
-      "gemini-pro",
-    ]);
+    expect(out.map((o) => o.model).sort()).toEqual(["gemini-2.5", "gemini-pro"]);
   });
 
   it("skips empty providers and models", () => {
@@ -76,7 +65,7 @@ describe("normalizeCatalog", () => {
       { provider: "codex", group: "free", models: ["a"] },
       { provider: "claude", models: ["c"] },
     ]);
-    expect(out.map((o) => o.provider + "/" + (o.group ?? "") + "/" + o.model)).toEqual([
+    expect(out.map((o) => `${o.provider}/${o.group ?? ""}/${o.model}`)).toEqual([
       "claude//c",
       "codex/free/a",
       "codex/team/b",
@@ -111,9 +100,7 @@ describe("normalizeCatalog tier union", () => {
   });
 
   it("leaves non-tiered providers without a group", () => {
-    const out = normalizeCatalog([
-      { provider: "claude", models: ["claude-sonnet-4"] },
-    ]);
+    const out = normalizeCatalog([{ provider: "claude", models: ["claude-sonnet-4"] }]);
     expect(out).toEqual([{ provider: "claude", model: "claude-sonnet-4" }]);
   });
 });
@@ -207,20 +194,11 @@ describe("fromAuthFileModels provider source", () => {
 
 describe("filterByConfigured", () => {
   // Bare static-definition entries (group undefined) for non-tiered providers.
-  const bare = (provider: string, models: string[]) =>
-    ({ provider, models });
+  const bare = (provider: string, models: string[]) => ({ provider, models });
 
   it("keeps bare static entries for configured providers", () => {
-    const entries = [
-      bare("claude", ["claude-sonnet-4"]),
-      bare("aistudio", ["gemini-2.5"]),
-    ];
-    const out = filterByConfigured(
-      entries,
-      new Set(["claude"]),
-      new Set(),
-      new Set(),
-    );
+    const entries = [bare("claude", ["claude-sonnet-4"]), bare("aistudio", ["gemini-2.5"])];
+    const out = filterByConfigured(entries, new Set(["claude"]), new Set(), new Set());
     expect(out.map((e) => e.provider)).toEqual(["claude"]);
   });
 
@@ -232,12 +210,7 @@ describe("filterByConfigured", () => {
       bare("aistudio", ["gemini-2.5"]),
       bare("gemini", ["gemini-pro"]),
     ];
-    const out = filterByConfigured(
-      entries,
-      new Set(["claude"]),
-      new Set(["gemini"]),
-      new Set(),
-    );
+    const out = filterByConfigured(entries, new Set(["claude"]), new Set(["gemini"]), new Set());
     expect(out.map((e) => e.provider).sort()).toEqual(["claude", "gemini"]);
   });
 
@@ -246,12 +219,7 @@ describe("filterByConfigured", () => {
     // a xai model, but the xai credential was removed. The row must stay
     // visible so the user can uncheck it.
     const entries = [bare("xai", ["grok-3"])];
-    const out = filterByConfigured(
-      entries,
-      new Set(),
-      new Set(["xai"]),
-      new Set(),
-    );
+    const out = filterByConfigured(entries, new Set(), new Set(["xai"]), new Set());
     expect(out.map((e) => e.provider)).toEqual(["xai"]);
   });
 
@@ -259,9 +227,7 @@ describe("filterByConfigured", () => {
     // Entries with a group come from the auth-files path and already imply a
     // configured credential; filterByConfigured must not drop them via the
     // configured/selected check.
-    const entries = [
-      { provider: "antigravity", group: "supported", models: ["gem-3"] },
-    ];
+    const entries = [{ provider: "antigravity", group: "supported", models: ["gem-3"] }];
     const out = filterByConfigured(entries, new Set(), new Set(), new Set());
     expect(out).toHaveLength(1);
     expect(out[0].provider).toBe("antigravity");
@@ -275,12 +241,7 @@ describe("filterByConfigured", () => {
       bare("codex", ["gpt-5"]),
       { provider: "codex", group: "team", models: ["gpt-5"] },
     ];
-    const out = filterByConfigured(
-      entries,
-      new Set(["codex"]),
-      new Set(),
-      new Set(["codex"]),
-    );
+    const out = filterByConfigured(entries, new Set(["codex"]), new Set(), new Set(["codex"]));
     expect(out).toHaveLength(1);
     expect(out[0].group).toBe("team");
   });
@@ -290,12 +251,7 @@ describe("filterByConfigured", () => {
     // The bare static entry is the only source of codex models and must stay,
     // gated only by the configured/selected check like any non-tiered provider.
     const entries = [bare("codex", ["gpt-5"])];
-    const out = filterByConfigured(
-      entries,
-      new Set(["codex"]),
-      new Set(),
-      new Set(),
-    );
+    const out = filterByConfigured(entries, new Set(["codex"]), new Set(), new Set());
     expect(out.map((e) => e.provider)).toEqual(["codex"]);
   });
 
@@ -307,12 +263,7 @@ describe("filterByConfigured", () => {
 
   it("is case-insensitive on provider matching", () => {
     const entries = [bare("Claude", ["claude-sonnet-4"])];
-    const out = filterByConfigured(
-      entries,
-      new Set(["claude"]),
-      new Set(),
-      new Set(),
-    );
+    const out = filterByConfigured(entries, new Set(["claude"]), new Set(), new Set());
     expect(out.map((e) => e.provider)).toEqual(["Claude"]);
   });
 
@@ -322,12 +273,7 @@ describe("filterByConfigured", () => {
     // adds such providers to `configured` so filterByConfigured keeps them —
     // otherwise a configured opencode channel would vanish from the picker.
     const entries = [bare("opencode", ["gpt-5"])];
-    const out = filterByConfigured(
-      entries,
-      new Set(["opencode"]),
-      new Set(),
-      new Set(),
-    );
+    const out = filterByConfigured(entries, new Set(["opencode"]), new Set(), new Set());
     expect(out.map((e) => e.provider)).toEqual(["opencode"]);
   });
 });
@@ -362,4 +308,3 @@ describe("classify group labels", () => {
     expect(groups.map((g) => g.group).sort()).toEqual(["classify:free", "free"]);
   });
 });
-

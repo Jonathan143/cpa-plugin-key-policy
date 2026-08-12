@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mark the test env so React's act() warning is silenced under jsdom.
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
 import { createRoot } from "react-dom/client";
 import type { ModelRule } from "../types";
 
@@ -24,7 +25,7 @@ vi.mock("../api/models", () => ({
     const map = new Map<string, FakeGroup>();
     for (const c of catalog) {
       const g = (c.group ?? "").toLowerCase();
-      const key = c.provider + "|" + g;
+      const key = `${c.provider}|${g}`;
       let bucket = map.get(key);
       if (!bucket) {
         bucket = { provider: c.provider, models: [] };
@@ -40,9 +41,9 @@ vi.mock("../api/models", () => ({
   },
 }));
 
+import { fetchCatalog } from "../api/models";
 // Import AFTER the mock so ModelPicker picks up the mocked fetchCatalog.
 import ModelPicker from "./ModelPicker";
-import { fetchCatalog } from "../api/models";
 
 const initial: ModelRule[] = [
   {
@@ -104,7 +105,8 @@ describe("ModelPicker empty-catalog guard", () => {
 
 describe("ModelPicker tier grouping", () => {
   it("emits group when a model is selected under a tier subgroup", async () => {
-    let resolveCatalog: (v: { provider: string; model: string; group?: string }[]) => void = () => {};
+    let resolveCatalog: (v: { provider: string; model: string; group?: string }[]) => void =
+      () => {};
     (fetchCatalog as ReturnType<typeof vi.fn>).mockImplementation(
       () => new Promise((res) => (resolveCatalog = res)),
     );
@@ -161,7 +163,8 @@ describe("ModelPicker legacy preselect preservation", () => {
     const legacyInitial: ModelRule[] = [
       { alias: "gpt-5-codex", provider: "codex", target_model: "gpt-5-codex" },
     ];
-    let resolveCatalog: (v: { provider: string; model: string; group?: string }[]) => void = () => {};
+    let resolveCatalog: (v: { provider: string; model: string; group?: string }[]) => void =
+      () => {};
     (fetchCatalog as ReturnType<typeof vi.fn>).mockImplementation(
       () => new Promise((res) => (resolveCatalog = res)),
     );

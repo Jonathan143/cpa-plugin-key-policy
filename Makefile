@@ -11,7 +11,7 @@ test:
 
 # Build the single-file web UI and place it where the Go embed expects it.
 web-build:
-	cd $(WEB) && npm install && VITE_HOSTED=1 npm run build
+	cd $(WEB) && pnpm install --frozen-lockfile && VITE_HOSTED=1 pnpm build
 	cp $(WEB)/dist/index.html $(EMBED_INDEX)
 
 build-linux-amd64: web-build

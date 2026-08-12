@@ -2,7 +2,7 @@
 // and serves it as a CPA plugin resource under
 // /v0/resource/plugins/cpa-key-policy/index.html.
 //
-// dist/index.html is a build artifact produced by `npm run build` in ../../web.
+// dist/index.html is a build artifact produced by `pnpm build` in ../../web.
 // A placeholder is committed so the Go build never fails when the frontend has
 // not been built yet; the real UI replaces it after a frontend build.
 package web

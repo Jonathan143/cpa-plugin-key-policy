@@ -1,5 +1,10 @@
+import type {
+  AliasMapping,
+  ClassifyPreviewResponse,
+  ClassifyRule,
+  CredentialDescriptor,
+} from "../types";
 import { apiClient, pluginPath } from "./client";
-import type { AliasMapping, ClassifyRule, CredentialDescriptor, ClassifyPreviewResponse } from "../types";
 import { readPlanType } from "./models";
 
 // --- Alias mapping CRUD ---
@@ -75,7 +80,9 @@ export async function fetchCredentialDescriptors(): Promise<CredentialDescriptor
     const o = (item ?? {}) as Record<string, unknown>;
     const id = ((o["id"] as string) ?? (o["name"] as string) ?? "").trim();
     if (!id) continue;
-    const provider = ((o["provider"] as string) ?? (o["type"] as string) ?? "").trim().toLowerCase();
+    const provider = ((o["provider"] as string) ?? (o["type"] as string) ?? "")
+      .trim()
+      .toLowerCase();
     const attrs: Record<string, string> = {};
     const planType = readPlanType(o);
     if (planType) attrs["plan_type"] = planType;

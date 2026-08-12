@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { fetchCatalog, formatTierLabel, groupByCatalog } from "../api/models";
 import type { CatalogGroup } from "../api/models";
-import type { ModelRule } from "../types";
+import { fetchCatalog, formatTierLabel, groupByCatalog } from "../api/models";
 import { useT } from "../i18n";
+import type { ModelRule } from "../types";
+import LoadingState from "./LoadingState";
 
 interface Props {
   // currently bound rules (for edit mode preselection)
@@ -32,7 +33,7 @@ export default function ModelPicker({ initial, onChange }: Props) {
     const s = new Set<string>();
     for (const r of initial ?? []) {
       const g = (r.group ?? "").toLowerCase();
-      s.add(r.provider.toLowerCase() + "|" + g + "|" + r.target_model.toLowerCase());
+      s.add(`${r.provider.toLowerCase()}|${g}|${r.target_model.toLowerCase()}`);
     }
     return s;
   });
@@ -48,9 +49,7 @@ export default function ModelPicker({ initial, onChange }: Props) {
         // has since been removed — the user can still see and uncheck their
         // rows. New-key mode has no initial rules, so only configured channels
         // appear.
-        const selectedProviders = new Set(
-          (initial ?? []).map((r) => r.provider.toLowerCase()),
-        );
+        const selectedProviders = new Set((initial ?? []).map((r) => r.provider.toLowerCase()));
         const cat = await fetchCatalog(selectedProviders);
         if (!alive) return;
         setGroups(groupByCatalog(cat));
@@ -64,7 +63,7 @@ export default function ModelPicker({ initial, onChange }: Props) {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [initial, t]);
 
   // emit ModelRule[] whenever selection (or available groups) change.
   // Guard: do NOT emit before the catalog has loaded (groups is empty). On
@@ -81,7 +80,7 @@ export default function ModelPicker({ initial, onChange }: Props) {
     for (const g of groups) {
       const gkey = (g.group ?? "").toLowerCase();
       for (const m of g.models) {
-        const key = g.provider + "|" + gkey + "|" + m.toLowerCase();
+        const key = `${g.provider}|${gkey}|${m.toLowerCase()}`;
         covered.add(key);
         if (selected.has(key)) {
           const rule: ModelRule = { alias: m, provider: g.provider, target_model: m };
@@ -119,14 +118,15 @@ export default function ModelPicker({ initial, onChange }: Props) {
         provider: g.provider,
         group: g.group,
         models: g.models.filter(
-          (m) => m.toLowerCase().includes(q) || g.provider.includes(q) || (g.group ?? "").includes(q),
+          (m) =>
+            m.toLowerCase().includes(q) || g.provider.includes(q) || (g.group ?? "").includes(q),
         ),
       }))
       .filter((g) => g.models.length > 0);
   }, [groups, query]);
 
   const keyOf = (g: CatalogGroup, model: string) =>
-    g.provider + "|" + (g.group ?? "").toLowerCase() + "|" + model.toLowerCase();
+    `${g.provider}|${(g.group ?? "").toLowerCase()}|${model.toLowerCase()}`;
 
   const toggle = (g: CatalogGroup, model: string) => {
     const key = keyOf(g, model);
@@ -154,48 +154,55 @@ export default function ModelPicker({ initial, onChange }: Props) {
     });
   };
 
-  if (loading) return <div className="muted">{t("picker.loading")}</div>;
-  if (error) return <div className="error">{error}</div>;
+  if (loading) return <LoadingState label={t("picker.loading")} variant="compact" rows={3} />;
+  if (error)
+    return (
+      <div className="rounded-xl border border-red-500/20 bg-[var(--danger-soft)] p-3 text-xs text-[var(--danger)]">
+        {error}
+      </div>
+    );
   if (groups.length === 0)
-    return <div className="muted">{t("picker.empty")}</div>;
+    return <div className="py-6 text-sm text-[var(--muted)]">{t("picker.empty")}</div>;
 
   return (
     <div>
       <input
-        className="input"
+        className="min-h-10 w-full rounded-xl border border-[var(--field-border)] bg-[var(--field-background)] px-3 text-sm outline-none focus:border-[var(--accent)]"
         placeholder={t("picker.searchPlaceholder")}
         value={query}
         onChange={(e) => setQuery(e.target.value)}
-        style={{ marginBottom: 12 }}
       />
-      <div className="muted" style={{ marginBottom: 8 }}>
+      <div className="mb-2 mt-3 text-xs text-[var(--muted)]">
         {t("picker.selected", { count: selected.size })}
       </div>
       {filtered.map((g) => {
         const groupLabel = g.group ? formatTierLabel(t, g.group) : "";
-        const head = g.provider + (groupLabel ? " · " + groupLabel : "");
+        const head = g.provider + (groupLabel ? ` · ${groupLabel}` : "");
         const allSelected = g.models.every((m) => selected.has(keyOf(g, m)));
         return (
-          <div className="picker-group" key={head}>
-            <div className="pg-head">
+          <div className="mb-3 overflow-hidden rounded-xl border border-[var(--border)]" key={head}>
+            <div className="flex items-center justify-between bg-[var(--surface-secondary)] px-3 py-2.5 text-xs font-semibold">
               <span>{head}</span>
-              <span className="pg-actions">
-                <button type="button" className="btn sm" onClick={() => (allSelected ? clearAll(g) : selectAll(g))}>
+              <span>
+                <button
+                  type="button"
+                  className="rounded-lg px-2 py-1 text-[10px] text-[var(--accent-soft-foreground)] hover:bg-[var(--accent-soft)]"
+                  onClick={() => (allSelected ? clearAll(g) : selectAll(g))}
+                >
                   {allSelected ? t("picker.clearAll") : t("picker.selectAll")}
                 </button>
               </span>
             </div>
-            <div className="pg-models">
+            <div className="grid gap-1 p-2 sm:grid-cols-2">
               {g.models.map((m) => {
                 const key = keyOf(g, m);
                 const active = selected.has(key);
                 return (
-                  <label key={key} className={active ? "active" : ""}>
-                    <input
-                      type="checkbox"
-                      checked={active}
-                      onChange={() => toggle(g, m)}
-                    />
+                  <label
+                    key={key}
+                    className={`flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-xs transition ${active ? "bg-[var(--accent-soft)] text-[var(--accent-soft-foreground)]" : "hover:bg-[var(--surface-secondary)]"}`}
+                  >
+                    <input type="checkbox" checked={active} onChange={() => toggle(g, m)} />
                     {m}
                   </label>
                 );

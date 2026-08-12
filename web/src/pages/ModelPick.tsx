@@ -1,225 +1,272 @@
+import { Button, Input } from "@heroui/react";
+import { Check, ChevronLeft, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams, useLocation } from "react-router-dom";
-import { fetchCatalog, formatTierLabel, groupByCatalog } from "../api/models";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import type { CatalogGroup } from "../api/models";
-import type { ModelRule, AliasTarget } from "../types";
+import { fetchCatalog, formatTierLabel, groupByCatalog } from "../api/models";
+import LoadingState from "../components/LoadingState";
 import { useT } from "../i18n";
+import type { AliasTarget, ModelRule } from "../types";
 
-// Selection key: "provider|group|model" (all lowercased for dedupe matching).
-function keyOf(g: CatalogGroup, model: string): string {
-  return g.provider + "|" + (g.group ?? "").toLowerCase() + "|" + model.toLowerCase();
+function selectionKey(provider: string, group: string | undefined, model: string): string {
+  return `${provider.toLowerCase()}|${(group ?? "").toLowerCase()}|${model.toLowerCase()}`;
+}
+
+function keyOf(group: CatalogGroup, model: string): string {
+  return selectionKey(group.provider, group.group, model);
+}
+
+function reconcileSelected(groups: CatalogGroup[], selected: Set<string>): Set<string> {
+  const catalogKeys = new Set<string>();
+  const candidatesByProviderModel = new Map<string, string[]>();
+
+  for (const group of groups)
+    for (const model of group.models) {
+      const key = keyOf(group, model);
+      const providerModel = `${group.provider.toLowerCase()}|${model.toLowerCase()}`;
+      catalogKeys.add(key);
+      candidatesByProviderModel.set(providerModel, [
+        ...(candidatesByProviderModel.get(providerModel) ?? []),
+        key,
+      ]);
+    }
+
+  const reconciled = new Set<string>();
+  for (const key of selected) {
+    if (catalogKeys.has(key)) {
+      reconciled.add(key);
+      continue;
+    }
+    const [provider, , ...modelParts] = key.split("|");
+    const candidates = candidatesByProviderModel.get(`${provider}|${modelParts.join("|")}`) ?? [];
+    reconciled.add(candidates.length === 1 ? candidates[0] : key);
+  }
+  return reconciled;
+}
+
+function rulePriceKey(rule: { alias: string; group?: string }): string {
+  return `${rule.group ? `${rule.group.toLowerCase()}|` : ""}${rule.alias.toLowerCase()}`;
 }
 
 export default function ModelPick() {
   const { id } = useParams<{ id?: string }>();
   const nav = useNavigate();
-  const loc = useLocation();
+  const location = useLocation();
   const t = useT();
-  const [groups, setGroups] = useState<CatalogGroup[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string>("");
-  const [query, setQuery] = useState("");
-
-  // Initial selection comes from router state (passed by KeyForm when it
-  // navigates here). Edit-mode keys pass their current models in too.
-  const st = loc.state as {
+  const state = location.state as {
     models?: ModelRule[];
     currentTargets?: AliasTarget[];
     returnTo?: string;
-    /** Full alias form draft — forwarded back so name/dispatch/prices survive. */
     draftAlias?: unknown;
+    draft?: { prices?: Record<string, Partial<ModelRule>> };
   } | null;
-  // Context-aware: if a `returnTo` route is supplied (e.g. from the alias
-  // editor), we are picking targets for a global alias, not models for a key.
-  const aliasMode = !!st?.returnTo;
-  const initialModels = st?.models ?? [];
-  const initialTargets = st?.currentTargets ?? [];
-  const backTo = aliasMode
-    ? st!.returnTo!
-    : (id ? `/keys/${encodeURIComponent(id)}/edit` : "/keys/new");
-  const draftAlias = st?.draftAlias;
-
-  const [selected, setSelected] = useState<Set<string>>(() => {
-    const s = new Set<string>();
-    for (const r of initialModels) {
-      const g = (r.group ?? "").toLowerCase();
-      s.add(r.provider.toLowerCase() + "|" + g + "|" + r.target_model.toLowerCase());
-    }
-    for (const tg of initialTargets) {
-      const g = (tg.group ?? "").toLowerCase();
-      s.add(tg.provider.toLowerCase() + "|" + g + "|" + tg.target_model.toLowerCase());
-    }
-    return s;
-  });
+  const aliasMode = Boolean(state?.returnTo);
+  const initialModels = useMemo(() => state?.models ?? [], [state?.models]);
+  const initialTargets = useMemo(() => state?.currentTargets ?? [], [state?.currentTargets]);
+  const backTo = state?.returnTo ?? (id ? `/keys/${encodeURIComponent(id)}/edit` : "/keys/new");
+  const [groups, setGroups] = useState<CatalogGroup[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(
+    () =>
+      new Set([
+        ...initialModels.map(
+          (rule) => selectionKey(rule.provider, rule.group, rule.target_model),
+        ),
+        ...initialTargets.map(
+          (target) => selectionKey(target.provider, target.group, target.target_model),
+        ),
+      ]),
+  );
 
   useEffect(() => {
     let alive = true;
-    (async () => {
-      setLoading(true);
-      setError("");
-      try {
-        const selectedProviders = new Set<string>();
-        for (const r of initialModels) selectedProviders.add(r.provider.toLowerCase());
-        for (const r of initialTargets) selectedProviders.add(r.provider.toLowerCase());
-        const cat = await fetchCatalog(selectedProviders);
+    const providers = new Set([
+      ...initialModels.map((rule) => rule.provider.toLowerCase()),
+      ...initialTargets.map((target) => target.provider.toLowerCase()),
+    ]);
+    void fetchCatalog(providers)
+      .then((catalog) => {
         if (!alive) return;
-        setGroups(groupByCatalog(cat));
-      } catch (e) {
-        if (!alive) return;
-        setError((e as Error).message || t("picker.loadFailed"));
-      } finally {
+        const nextGroups = groupByCatalog(catalog);
+        setSelected((current) => reconcileSelected(nextGroups, current));
+        setGroups(nextGroups);
+      })
+      .catch((caught) => {
+        if (alive) setError((caught as Error).message || t("picker.loadFailed"));
+      })
+      .finally(() => {
         if (alive) setLoading(false);
-      }
-    })();
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [initialModels, initialTargets, t]);
 
-  // Build the ModelRule[] for the current selection. Includes stale entries
-  // the catalog no longer covers (legacy edit-mode rows), so upgrading never
-  // drops a model from an existing key.
-  const rules: ModelRule[] = useMemo(() => {
+  const rules = useMemo(() => {
     const covered = new Set<string>();
-    const out: ModelRule[] = [];
-    for (const g of groups) {
-      for (const m of g.models) {
-        const k = keyOf(g, m);
-        covered.add(k);
-        if (selected.has(k)) {
-          const rule: ModelRule = { alias: m, provider: g.provider, target_model: m };
-          if (g.group) rule.group = g.group;
-          out.push(rule);
-        }
+    const result: ModelRule[] = [];
+    for (const group of groups)
+      for (const model of group.models) {
+        const key = keyOf(group, model);
+        covered.add(key);
+        if (selected.has(key))
+          result.push({
+            alias: model,
+            provider: group.provider,
+            target_model: model,
+            ...(group.group ? { group: group.group } : {}),
+          });
       }
-    }
-    for (const k of selected) {
-      if (covered.has(k)) continue;
-      const [provider, group, ...rest] = k.split("|");
-      const model = rest.join("|");
-      if (!provider || !model) continue;
-      const rule: ModelRule = { alias: model, provider, target_model: model };
-      if (group) rule.group = group;
-      out.push(rule);
-    }
-    return out;
-  }, [selected, groups]);
+    for (const key of selected)
+      if (!covered.has(key)) {
+        const [provider, group, ...rest] = key.split("|");
+        const model = rest.join("|");
+        if (provider && model)
+          result.push({ alias: model, provider, target_model: model, ...(group ? { group } : {}) });
+      }
+    return result;
+  }, [groups, selected]);
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return groups;
-    const q = query.trim().toLowerCase();
+    const value = query.trim().toLowerCase();
+    if (!value) return groups;
     return groups
-      .map((g) => ({
-        provider: g.provider,
-        group: g.group,
-        models: g.models.filter(
-          (m) => m.toLowerCase().includes(q) || g.provider.includes(q) || (g.group ?? "").includes(q),
+      .map((group) => ({
+        ...group,
+        models: group.models.filter(
+          (model) =>
+            model.toLowerCase().includes(value) ||
+            group.provider.includes(value) ||
+            (group.group ?? "").includes(value),
         ),
       }))
-      .filter((g) => g.models.length > 0);
+      .filter((group) => group.models.length);
   }, [groups, query]);
 
-  const toggle = (g: CatalogGroup, model: string) => {
-    const k = keyOf(g, model);
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(k)) next.delete(k); else next.add(k);
-      return next;
-    });
-  };
-  const selectAll = (g: CatalogGroup) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      for (const m of g.models) next.add(keyOf(g, m));
-      return next;
-    });
-  };
-  const clearAll = (g: CatalogGroup) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      for (const m of g.models) next.delete(keyOf(g, m));
-      return next;
-    });
-  };
-
   const finish = () => {
-    if (aliasMode) {
-      const targets: AliasTarget[] = rules.map((r) => {
-        const t: AliasTarget = { provider: r.provider, target_model: r.target_model };
-        if (r.group) t.group = r.group;
-        return t;
-      });
-      nav(backTo, { state: { pickedTargets: targets, draftAlias } });
-    } else {
-      nav(backTo, { state: { pickedModels: rules } });
-    }
-  };
-
-  const goBack = () => {
-    // Preserve in-progress alias form fields even when canceling the picker.
-    if (aliasMode) {
+    if (aliasMode)
       nav(backTo, {
         state: {
-          draftAlias,
-          // Keep previous targets if user backs out without confirming.
-          pickedTargets: initialTargets,
+          pickedTargets: rules.map((rule) => ({
+            provider: rule.provider,
+            target_model: rule.target_model,
+            ...(rule.group ? { group: rule.group } : {}),
+          })),
+          draftAlias: state?.draftAlias,
         },
       });
-      return;
-    }
-    nav(backTo);
+    else
+      nav(backTo, {
+        state: {
+          pickedModels: rules.map((rule) => ({
+            ...rule,
+            ...(state?.draft?.prices?.[rulePriceKey(rule)] ?? {}),
+          })),
+          draft: state?.draft,
+        },
+      });
+  };
+  const goBack = () => {
+    if (aliasMode)
+      nav(backTo, { state: { draftAlias: state?.draftAlias, pickedTargets: initialTargets } });
+    else nav(backTo, { state: { draft: state?.draft, pickedModels: initialModels } });
   };
 
   return (
-    <div className="model-pick-page">
-      <div className="mp-head">
-        <button type="button" className="btn sm" onClick={goBack}>{t("keyUsage.back")}</button>
-        <h1>{t("picker.title")}</h1>
-        <button className="btn primary sm" onClick={finish} disabled={loading}>
+    <section className="mx-auto grid max-w-5xl gap-5">
+      <header className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={goBack}
+            className="grid size-9 place-items-center rounded-xl border border-[var(--border)] text-[var(--muted)] hover:bg-[var(--surface-secondary)]"
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">{t("picker.title")}</h1>
+            <p className="text-xs text-[var(--muted)]">
+              {t("picker.selected", { count: selected.size })}
+            </p>
+          </div>
+        </div>
+        <Button variant="primary" onPress={finish} isDisabled={loading}>
+          <Check size={16} />
           {t("picker.done", { count: selected.size })}
-        </button>
-      </div>
-      <div className="mp-sub">{t("picker.selected", { count: selected.size })}</div>
-      <div className="mp-search">
-        <span className="mp-icon">⌕</span>
-        <input
-          className="input"
+        </Button>
+      </header>
+      <div className="relative flex items-center">
+        <Search
+          size={17}
+          className="pointer-events-none absolute left-3 z-10 text-[var(--muted)]"
+        />
+        <Input
+          className="pl-9"
           placeholder={t("picker.searchPlaceholder")}
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(event) => setQuery(event.target.value)}
+          fullWidth
         />
       </div>
-      <div className="card mp-list">
+      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-sm">
         {loading ? (
-          <div className="muted">{t("picker.loading")}</div>
+          <LoadingState label={t("picker.loading")} variant="list" rows={5} />
         ) : error ? (
-          <div className="error">{error}</div>
-        ) : groups.length === 0 ? (
-          <div className="muted">{t("picker.empty")}</div>
+          <div className="m-4 rounded-xl bg-[var(--danger-soft)] p-3 text-xs text-[var(--danger)]">
+            {error}
+          </div>
         ) : filtered.length === 0 ? (
-          <div className="muted">{t("picker.noMatch")}</div>
+          <div className="p-8 text-center text-sm text-[var(--muted)]">
+            {groups.length ? t("picker.noMatch") : t("picker.empty")}
+          </div>
         ) : (
-          filtered.map((g) => {
-            const groupLabel = g.group ? formatTierLabel(t, g.group) : "";
-            const head = g.provider + (groupLabel ? " · " + groupLabel : "");
-            const allSelected = g.models.every((m) => selected.has(keyOf(g, m)));
+          filtered.map((group) => {
+            const heading = `${group.provider}${group.group ? ` · ${formatTierLabel(t, group.group)}` : ""}`;
+            const allSelected = group.models.every((model) => selected.has(keyOf(group, model)));
             return (
-              <div className="picker-group" key={head}>
-                <div className="pg-head">
-                  <span>{head}</span>
-                  <span className="pg-actions">
-                    <button type="button" className="btn sm" onClick={() => (allSelected ? clearAll(g) : selectAll(g))}>
-                      {allSelected ? t("picker.clearAll") : t("picker.selectAll")}
-                    </button>
-                  </span>
+              <div key={heading} className="border-b border-[var(--separator)] last:border-0">
+                <div className="flex items-center justify-between bg-[var(--surface-secondary)] px-4 py-3">
+                  <strong className="text-xs">{heading}</strong>
+                  <button
+                    type="button"
+                    className="rounded-lg px-2 py-1 text-[10px] text-[var(--accent-soft-foreground)] hover:bg-[var(--accent-soft)]"
+                    onClick={() =>
+                      setSelected((previous) => {
+                        const next = new Set(previous);
+                        for (const model of group.models)
+                          if (allSelected) next.delete(keyOf(group, model));
+                          else next.add(keyOf(group, model));
+                        return next;
+                      })
+                    }
+                  >
+                    {allSelected ? t("picker.clearAll") : t("picker.selectAll")}
+                  </button>
                 </div>
-                <div className="pg-models">
-                  {g.models.map((m) => {
-                    const k = keyOf(g, m);
-                    const active = selected.has(k);
+                <div className="grid gap-1 p-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {group.models.map((model) => {
+                    const key = keyOf(group, model);
+                    const active = selected.has(key);
                     return (
-                      <label key={k} className={active ? "active" : ""}>
-                        <input type="checkbox" checked={active} onChange={() => toggle(g, m)} />
-                        {m}
+                      <label
+                        key={key}
+                        className={`flex cursor-pointer items-center gap-2 rounded-xl px-3 py-2.5 text-xs transition ${active ? "bg-[var(--accent-soft)] text-[var(--accent-soft-foreground)]" : "hover:bg-[var(--surface-secondary)]"}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={active}
+                          onChange={() =>
+                            setSelected((previous) => {
+                              const next = new Set(previous);
+                              if (next.has(key)) next.delete(key);
+                              else next.add(key);
+                              return next;
+                            })
+                          }
+                        />
+                        {model}
                       </label>
                     );
                   })}
@@ -229,15 +276,19 @@ export default function ModelPick() {
           })
         )}
       </div>
-      <div className="mp-footer">
-        <span className="mp-count">{t("picker.selected", { count: selected.size })}</span>
-        <div className="mp-btns">
-          <button type="button" className="btn sm" onClick={goBack}>{t("keyForm.cancel")}</button>
-          <button className="btn primary sm" onClick={finish} disabled={loading}>
+      <div className="sticky bottom-20 flex items-center justify-between rounded-2xl border border-[var(--border)] bg-[color-mix(in_srgb,var(--surface)_82%,transparent)] p-3 shadow-lg backdrop-blur-xl lg:bottom-4">
+        <span className="text-xs text-[var(--muted)]">
+          {t("picker.selected", { count: selected.size })}
+        </span>
+        <div className="flex gap-2">
+          <Button variant="ghost" onPress={goBack}>
+            {t("keyForm.cancel")}
+          </Button>
+          <Button variant="primary" onPress={finish} isDisabled={loading}>
             {t("picker.done", { count: selected.size })}
-          </button>
+          </Button>
         </div>
       </div>
-    </div>
+    </section>
   );
 }

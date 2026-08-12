@@ -17,7 +17,7 @@
 // localStorage — same isolation policy as themeSync. We also do NOT write to
 // the shared `cli-proxy-language` key; only the panel writes it.
 
-import { getLocale, isSupportedLocale, setLocale, type Locale } from "./index";
+import { getLocale, isSupportedLocale, type Locale, setLocale } from "./index";
 
 const PANEL_LANG_STORAGE_KEY = "cli-proxy-language";
 
@@ -41,13 +41,18 @@ function parseStoredLanguage(raw: string): Locale | null {
   if (!raw) return null;
   // Try JSON envelope first.
   try {
-    const parsed = JSON.parse(raw) as { state?: { language?: unknown }; language?: unknown } | unknown;
+    const parsed = JSON.parse(raw) as
+      | { state?: { language?: unknown }; language?: unknown }
+      | unknown;
     const fromState = (parsed as { state?: { language?: unknown } })?.state?.language;
     const fromTop = (parsed as { language?: unknown })?.language;
     const candidate =
-      typeof fromState === "string" ? fromState
-        : typeof fromTop === "string" ? fromTop
-          : typeof parsed === "string" ? (parsed as string)
+      typeof fromState === "string"
+        ? fromState
+        : typeof fromTop === "string"
+          ? fromTop
+          : typeof parsed === "string"
+            ? (parsed as string)
             : null;
     if (candidate && isSupportedLocale(candidate)) return candidate;
   } catch {

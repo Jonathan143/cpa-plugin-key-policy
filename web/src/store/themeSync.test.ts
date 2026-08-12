@@ -1,9 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  initThemeSync,
-  _resolveParentTheme,
-  _teardownThemeSync,
-} from "./themeSync";
+import { _resolveParentTheme, _teardownThemeSync, initThemeSync } from "./themeSync";
 
 // The resolver reads window.parent.document.documentElement[data-theme].
 // jsdom gives us a real document, but no separate "parent" document by default.
@@ -140,9 +136,7 @@ describe("initThemeSync apply", () => {
 
     // Simulate panel flipping to dark and re-applying to its DOM.
     parentHtml.setAttribute("data-theme", "dark");
-    window.dispatchEvent(
-      new StorageEvent("storage", { key: "cli-proxy-theme" }),
-    );
+    window.dispatchEvent(new StorageEvent("storage", { key: "cli-proxy-theme" }));
     expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
   });
 

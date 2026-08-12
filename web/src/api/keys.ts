@@ -1,11 +1,11 @@
-import { apiClient, pluginPath } from "./client";
 import type {
-  KeyPublic,
-  KeyWriteRequest,
   CreateKeyResponse,
-  RotateKeyResponse,
+  KeyPublic,
   KeyUsageResponse,
+  KeyWriteRequest,
+  RotateKeyResponse,
 } from "../types";
+import { apiClient, pluginPath } from "./client";
 
 export async function listKeys(): Promise<KeyPublic[]> {
   const c = apiClient();
@@ -13,17 +13,13 @@ export async function listKeys(): Promise<KeyPublic[]> {
   return data.keys ?? [];
 }
 
-export async function createKey(
-  req: KeyWriteRequest,
-): Promise<CreateKeyResponse> {
+export async function createKey(req: KeyWriteRequest): Promise<CreateKeyResponse> {
   const c = apiClient();
   const { data } = await c.post<CreateKeyResponse>(pluginPath("/keys"), req);
   return data;
 }
 
-export async function patchKey(
-  req: KeyWriteRequest,
-): Promise<KeyPublic> {
+export async function patchKey(req: KeyWriteRequest): Promise<KeyPublic> {
   const c = apiClient();
   const { data } = await c.patch<{ key: KeyPublic }>(pluginPath("/keys"), req);
   return data.key;
@@ -36,10 +32,7 @@ export async function deleteKey(id: string): Promise<void> {
 
 export async function rotateKey(id: string): Promise<RotateKeyResponse> {
   const c = apiClient();
-  const { data } = await c.post<RotateKeyResponse>(
-    pluginPath("/keys/rotate"),
-    { id },
-  );
+  const { data } = await c.post<RotateKeyResponse>(pluginPath("/keys/rotate"), { id });
   return data;
 }
 
@@ -69,7 +62,7 @@ export function buildModelRules(
     const provider = s.provider.toLowerCase().trim();
     const target = s.model.trim();
     if (!provider || !target) continue;
-    const key = provider + "/" + target.toLowerCase();
+    const key = `${provider}/${target.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({ alias: target, provider, target_model: target });

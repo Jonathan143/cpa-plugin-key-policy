@@ -91,6 +91,7 @@ CPA 里配置的兼容通道，映射时 `provider` 填通道 **name**。插件�
 ## 编译
 
 Linux `.so` 需要 cgo：
+Web UI 需要 Node.js `^22.22.2` 或 `>=24.15.0` 以及 pnpm 11.21.0。首次使用请运行一次 `corepack enable`，后续会读取 `web/package.json` 中固定的包管理器版本。
 
 ```bash
 make test
@@ -151,8 +152,8 @@ http://<你的-cpa-主机>:<api端口>/v0/resource/plugins/cpa-key-policy/index.
 
 ```bash
 cd web
-npm install
-VITE_CPA_BASE=http://127.0.0.1:8317 npm run dev
+pnpm install
+VITE_CPA_BASE=http://127.0.0.1:8317 pnpm dev
 ```
 
 ---
@@ -242,6 +243,5 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/aliases" \
 
 ```bash
 go test ./...
-cd web && npm test && npm run build
+cd web && pnpm test && pnpm build
 ```
-

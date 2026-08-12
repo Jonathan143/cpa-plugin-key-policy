@@ -1,127 +1,174 @@
+import { AlertDialog, Button, toast } from "@heroui/react";
+import { ChevronLeft, RefreshCw, RotateCw, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams, useLocation } from "react-router-dom";
-import { listKeys, patchKey, rotateKey, resetRPM, deleteKey } from "../api/keys";
-import type { KeyPublic, ModelRule } from "../types";
-import KeyForm from "../components/KeyForm";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { deleteKey, listKeys, patchKey, resetRPM, rotateKey } from "../api/keys";
+import KeyForm, { type KeyFormValues } from "../components/KeyForm";
+import LoadingState from "../components/LoadingState";
 import PlainKeyModal from "../components/PlainKeyModal";
-import { MobileFormHeader, MobileTabBar } from "./KeyList";
 import { useT } from "../i18n";
+import type { KeyPublic, ModelRule } from "../types";
+
+type PickerState = { pickedModels?: ModelRule[]; draft?: Partial<KeyFormValues> } | null;
 
 export default function KeyEdit() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
-  const loc = useLocation();
+  const location = useLocation();
   const t = useT();
   const [key, setKey] = useState<KeyPublic | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [plain, setPlain] = useState<string | null>(null);
-  const [plainTitle, setPlainTitle] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [typedId, setTypedId] = useState("");
+  const pickerState = location.state as PickerState;
 
   useEffect(() => {
-    (async () => {
-      setLoading(true);
-      try {
-        const all = await listKeys();
-        const found = all.find((k) => k.id === decodeURIComponent(id ?? ""));
-        if (!found) setError(t("keys.notFound"));
-        else setKey(found);
-      } catch (e) {
-        setError((e as Error).message ?? t("keys.loadFailed"));
-      } finally {
-        setLoading(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+    void listKeys()
+      .then((items) => {
+        const found = items.find((item) => item.id === decodeURIComponent(id ?? ""));
+        if (found) setKey(found);
+        else setError(t("keys.notFound"));
+      })
+      .catch((caught) => setError((caught as Error).message ?? t("keys.loadFailed")))
+      .finally(() => setLoading(false));
+  }, [id, t]);
 
-  // When the model-picker page returns, merge its selection into the loaded
-  // key's models, preserving everything else (id/name/limits/prices). The
-  // KeyForm price-map init keeps existing rows for aliases that survived.
-  const picked = (loc.state as { pickedModels?: ModelRule[] } | null)?.pickedModels;
-  const initial = useMemo<KeyPublic | null>(() => {
+  const initial = useMemo(() => {
     if (!key) return null;
-    if (!picked) return key;
-    return { ...key, models: picked };
-  }, [key, picked]);
+    const draft = pickerState?.draft;
+    return {
+      ...key,
+      ...(draft ?? {}),
+      models: pickerState?.pickedModels ?? draft?.models ?? key.models,
+    };
+  }, [key, pickerState]);
 
-  if (loading) return <div className="muted">{t("keys.loading")}</div>;
-  if (error || !key) return <div className="error">{error || t("edit.notFound")}</div>;
-  if (!initial) return null;
+  if (loading) return <LoadingState label={t("keys.loading")} />;
+  if (error || !initial)
+    return (
+      <div className="rounded-xl border border-red-500/20 bg-[var(--danger-soft)] p-4 text-sm text-[var(--danger)]">
+        {error || t("edit.notFound")}
+      </div>
+    );
 
-  const title = t("edit.title", { id: key.id });
-
-  const onRotate = async () => {
-    if (!confirm(t("keys.rotateConfirm", { id: key.id }))) return;
-    try {
-      const r = await rotateKey(key.id);
-      setPlain(r.plain_key);
-      setPlainTitle(t("keys.rotated"));
-    } catch (e) {
-      alert((e as Error).message ?? t("keys.rotateFailed"));
-    }
+  const rotate = async () => {
+    const result = await rotateKey(initial.id);
+    setPlain(result.plain_key);
+    toast.success(t("keys.rotateOk"));
   };
-  const onReset = async () => {
-    try {
-      await resetRPM(key.id);
-    } catch (e) {
-      alert((e as Error).message ?? t("keys.resetFailed"));
-    }
+  const reset = async () => {
+    await resetRPM(initial.id);
+    toast.success(t("app.rpmReset"));
   };
-  const onDelete = async () => {
-    if (!confirm(t("keys.deleteConfirm", { id: key.id }))) return;
-    try {
-      await deleteKey(key.id);
-      nav("/keys");
-    } catch (e) {
-      alert((e as Error).message ?? t("keys.deleteFailed"));
-    }
+  const remove = async () => {
+    await deleteKey(initial.id);
+    toast.success(t("app.keyDeleted"));
+    nav("/keys");
   };
 
   return (
-    <div className="form-page">
-      <div className="fp-head mobile-hidden">
-        <h1>{t("edit.hTitle")}</h1>
-        <div className="fp-actions">
-          <button className="btn sm" onClick={onReset}>{t("keys.resetRpm")}</button>
-          <button className="btn sm" onClick={onRotate}>{t("keys.rotate")}</button>
-          <button className="btn sm" onClick={() => nav("/keys")}>{t("keyForm.cancel")}</button>
+    <section className="mx-auto grid max-w-5xl gap-6">
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <button
+            type="button"
+            onClick={() => nav("/keys")}
+            className="mt-1 grid size-9 shrink-0 place-items-center rounded-xl border border-[var(--border)] text-[var(--muted)] transition hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+          >
+            <ChevronLeft size={19} />
+          </button>
+          <div>
+            <p className="m-0 text-[10px] font-bold tracking-[.14em] text-[var(--accent-soft-foreground)]">
+              KEY POLICY
+            </p>
+            <h1 className="mb-1 mt-0.5 text-3xl font-bold tracking-tight">{t("edit.hTitle")}</h1>
+            <p className="m-0 font-mono text-xs text-[var(--muted)]">
+              {initial.id} · {initial.name}
+            </p>
+          </div>
         </div>
-      </div>
-      <div className="fp-idline mobile-hidden">
-        {key.id}<span className="fp-name">{key.name}</span>
-      </div>
-      <MobileFormHeader title={title} backTo="/keys" />
+        <div className="flex gap-2">
+          <Button variant="secondary" onPress={reset}>
+            <RefreshCw size={16} />
+            {t("keys.resetRpm")}
+          </Button>
+          <Button variant="secondary" onPress={rotate}>
+            <RotateCw size={16} />
+            {t("keys.rotate")}
+          </Button>
+        </div>
+      </header>
       <KeyForm
         initial={initial}
         idReadOnly
-        pickPath={`/keys/${encodeURIComponent(key.id)}/edit/models`}
+        draftKey={`key-form-edit-${initial.id}`}
+        preferInitialModels={Boolean(pickerState?.pickedModels)}
+        pickPath={`/keys/${encodeURIComponent(initial.id)}/edit/models`}
         submitLabel={t("edit.save")}
         onCancel={() => nav("/keys")}
         dangerLabel={t("keys.delete")}
-        onDanger={onDelete}
-        onSubmit={async (v) => {
+        onDanger={() => setConfirmDelete(true)}
+        onSubmit={async (value) => {
           await patchKey({
-            id: v.id,
-            name: v.name || undefined,
-            enabled: v.enabled,
-            rpm: v.rpm,
-            models: v.models,
-            daily_limit_usd: v.daily_limit_usd,
-            weekly_limit_usd: v.weekly_limit_usd,
-            allow_models_endpoint: v.allow_models_endpoint,
+            id: value.id,
+            name: value.name || undefined,
+            enabled: value.enabled,
+            rpm: value.rpm,
+            models: value.models,
+            daily_limit_usd: value.daily_limit_usd,
+            weekly_limit_usd: value.weekly_limit_usd,
+            allow_models_endpoint: value.allow_models_endpoint,
           });
+          toast.success(t("app.changesSaved"));
           nav("/keys");
         }}
       />
       {plain && (
-        <PlainKeyModal
-          plainKey={plain}
-          title={plainTitle}
-          onClose={() => setPlain(null)}
-        />
+        <PlainKeyModal plainKey={plain} title={t("keys.rotated")} onClose={() => setPlain(null)} />
       )}
-      <MobileTabBar active="keys" />
-    </div>
+      {confirmDelete && (
+        <AlertDialog.Backdrop
+          isOpen
+          onOpenChange={setConfirmDelete}
+          className="bg-slate-950/65 p-4 backdrop-blur-md"
+        >
+          <AlertDialog.Container placement="center" size="sm">
+            <AlertDialog.Dialog className="rounded-2xl border border-[var(--border)] bg-[var(--overlay)] p-1 shadow-2xl">
+              <AlertDialog.Header>
+                <AlertDialog.Icon status="danger">
+                  <Trash2 size={20} />
+                </AlertDialog.Icon>
+                <AlertDialog.Heading>{t("app.deleteKey")}</AlertDialog.Heading>
+              </AlertDialog.Header>
+              <AlertDialog.Body>
+                <p className="mb-4 text-xs text-[var(--muted)]">
+                  {t("keys.deleteConfirm", { id: initial.id })}
+                </p>
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold">
+                    {t("app.typeId", { id: initial.id })}
+                  </label>
+                  <input
+                    className="min-h-10 w-full rounded-xl border border-[var(--field-border)] bg-[var(--field-background)] px-3 font-mono text-sm outline-none focus:border-[var(--accent)]"
+                    value={typedId}
+                    onChange={(event) => setTypedId(event.target.value)}
+                  />
+                </div>
+              </AlertDialog.Body>
+              <AlertDialog.Footer>
+                <Button variant="tertiary" onPress={() => setConfirmDelete(false)}>
+                  {t("keyForm.cancel")}
+                </Button>
+                <Button variant="danger" isDisabled={typedId !== initial.id} onPress={remove}>
+                  {t("keys.delete")}
+                </Button>
+              </AlertDialog.Footer>
+            </AlertDialog.Dialog>
+          </AlertDialog.Container>
+        </AlertDialog.Backdrop>
+      )}
+    </section>
   );
 }

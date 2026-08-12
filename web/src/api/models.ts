@@ -1,5 +1,5 @@
-import { apiClient, pluginPath } from "./client";
 import type { CatalogModel } from "../types";
+import { apiClient, pluginPath } from "./client";
 
 /** Prefix applied to custom classify groups in catalog entries / ModelRule.group. */
 export const CLASSIFY_GROUP_PREFIX = "classify:";
@@ -21,7 +21,7 @@ export function formatTierLabel(
     const name = group.slice(CLASSIFY_GROUP_PREFIX.length);
     return t("picker.tier.classify", { name });
   }
-  const key = "picker.tier." + group;
+  const key = `picker.tier.${group}`;
   const translated = t(key);
   return translated === key ? group : translated;
 }
@@ -89,7 +89,7 @@ export function normalizeCatalog(entries: RawEntry[]): CatalogModel[] {
     for (const m of toStrings(e.models)) {
       const model = m.trim();
       if (!model) continue;
-      const key = provider + "" + group + "" + model.toLowerCase();
+      const key = `${provider}${group}${model.toLowerCase()}`;
       if (seen.has(key)) continue;
       seen.add(key);
       const row: CatalogModel = { provider, model };
@@ -180,7 +180,9 @@ function fromAuthFiles(payload: unknown): AuthFileMeta[] {
     const o = (item ?? {}) as Record<string, unknown>;
     const name = ((o["name"] as string) ?? (o["id"] as string) ?? "").trim();
     if (!name) continue;
-    const provider = ((o["provider"] as string) ?? (o["type"] as string) ?? "").trim().toLowerCase();
+    const provider = ((o["provider"] as string) ?? (o["type"] as string) ?? "")
+      .trim()
+      .toLowerCase();
     const planType = readPlanType(o);
     out.push({ name, provider, planType });
   }
@@ -207,7 +209,7 @@ export function readPlanType(entry: Record<string, unknown>): string {
       return plan.trim().toLowerCase();
     }
     // Defensive fallback: nested under a "claims" sub-object.
-    const claims = tok["claims"];
+    const claims = tok.claims;
     if (claims && typeof claims === "object") {
       const nested = (claims as Record<string, unknown>)["plan_type"];
       if (typeof nested === "string" && nested.trim() !== "") {
@@ -216,7 +218,7 @@ export function readPlanType(entry: Record<string, unknown>): string {
     }
   }
   // antigravity tier identity, when present, sits at the top level.
-  const tier = entry["tier"];
+  const tier = entry.tier;
   if (typeof tier === "string" && tier.trim() !== "") {
     return tier.trim().toLowerCase();
   }
@@ -280,13 +282,11 @@ export function filterByConfigured(
       // Drop when it's a tiered provider already covered by auth-files (the
       // tier subgroups are the real, backed rows; this bare one is a dup with
       // no auth file behind it)...
-      const dupOfTiered =
-        TIERED_PROVIDERS.has(provider) && tieredFromAuth.has(provider);
+      const dupOfTiered = TIERED_PROVIDERS.has(provider) && tieredFromAuth.has(provider);
       // ...or when the provider is neither configured nor has a selected model
       // (unconfigured channel should be hidden, but an edited key's rows stay
       // visible so the user can uncheck them).
-      const unconfigured =
-        !configured.has(provider) && !selected.has(provider);
+      const unconfigured = !configured.has(provider) && !selected.has(provider);
       if (dupOfTiered || unconfigured) continue;
     }
     out.push(e);
@@ -303,9 +303,7 @@ export function filterByConfigured(
 // has model rules for (edit-mode prefill). Providers in this set stay visible
 // even when unconfigured, so the user can see and uncheck their rows. New-key
 // mode passes nothing (empty set) and only configured channels appear.
-export async function fetchCatalog(
-  selectedProviders?: Set<string>,
-): Promise<CatalogModel[]> {
+export async function fetchCatalog(selectedProviders?: Set<string>): Promise<CatalogModel[]> {
   const c = apiClient();
   const entries: RawEntry[] = [];
   // Tiered providers that the auth-files path contributed models for. Filled
@@ -329,21 +327,18 @@ export async function fetchCatalog(
     }
   };
 
-  await safe(
-    c.get("/v0/management/openai-compatibility"),
-    (d) => {
-      const compatEntries = fromOpenAICompat(d);
-      // Every provider listed under openai-compatibility is, by construction,
-      // one the user configured a credential for (the list only contains
-      // configured compat entries). Record that so filterByConfigured doesn't
-      // drop their bare entries as "unconfigured".
-      for (const e of compatEntries) {
-        const p = (e.provider ?? "").toLowerCase();
-        if (p) configuredProviders.add(p);
-      }
-      entries.push(...compatEntries);
-    },
-  );
+  await safe(c.get("/v0/management/openai-compatibility"), (d) => {
+    const compatEntries = fromOpenAICompat(d);
+    // Every provider listed under openai-compatibility is, by construction,
+    // one the user configured a credential for (the list only contains
+    // configured compat entries). Record that so filterByConfigured doesn't
+    // drop their bare entries as "unconfigured".
+    for (const e of compatEntries) {
+      const p = (e.provider ?? "").toLowerCase();
+      if (p) configuredProviders.add(p);
+    }
+    entries.push(...compatEntries);
+  });
 
   // Per-channel API-key endpoints. These responses carry their key list under a
   // top-level "<channel>-api-key" array (NOT under "models"/"keys"), so
@@ -351,7 +346,7 @@ export async function fetchCatalog(
   // the user has configured an API-key credential, marking the mapped provider
   // as configured when the list is non-empty.
   for (const ch of Object.keys(API_KEY_CHANNELS)) {
-    await safe(c.get("/v0/management/" + ch), (d) => {
+    await safe(c.get(`/v0/management/${ch}`), (d) => {
       const provider = apiKeyProviderIfConfigured(ch, d);
       if (provider) configuredProviders.add(provider);
     });
@@ -430,9 +425,8 @@ export async function fetchCatalog(
   });
 
   for (const ch of STATIC_CHANNELS) {
-    await safe(
-      c.get("/v0/management/model-definitions/" + ch),
-      (d) => entries.push(...fromModelDefinitions(ch, d)),
+    await safe(c.get(`/v0/management/model-definitions/${ch}`), (d) =>
+      entries.push(...fromModelDefinitions(ch, d)),
     );
   }
 
@@ -463,7 +457,7 @@ export function groupByCatalog(catalog: CatalogModel[]): CatalogGroup[] {
   const map = new Map<string, CatalogGroup>();
   for (const c of catalog) {
     const group = c.group ?? "";
-    const key = c.provider + "\0" + group;
+    const key = `${c.provider}\0${group}`;
     let bucket = map.get(key);
     if (!bucket) {
       bucket = { provider: c.provider, models: [] };

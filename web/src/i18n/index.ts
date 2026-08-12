@@ -20,10 +20,10 @@
 // langSync falls back to browser default / zh-CN and never touches storage.
 
 import { useEffect, useState } from "react";
-import zhCN from "./locales/zh-CN.json";
-import zhTW from "./locales/zh-TW.json";
 import en from "./locales/en.json";
 import ru from "./locales/ru.json";
+import zhCN from "./locales/zh-CN.json";
+import zhTW from "./locales/zh-TW.json";
 
 export type Locale = "zh-CN" | "zh-TW" | "en" | "ru";
 

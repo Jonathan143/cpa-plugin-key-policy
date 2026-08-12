@@ -93,6 +93,7 @@ Channels under CPA `openai-compatibility` (e.g. a named proxy) use the **channel
 ## Build
 
 Linux `.so` needs cgo and a matching toolchain:
+The Web UI requires Node.js `^22.22.2` or `>=24.15.0` and pnpm 11.21.0. Run `corepack enable` once to make the package-manager version from `web/package.json` available.
 
 ```bash
 make test
@@ -155,8 +156,8 @@ Dev UI without rebuilding the `.so`:
 
 ```bash
 cd web
-npm install
-VITE_CPA_BASE=http://127.0.0.1:8317 npm run dev
+pnpm install
+VITE_CPA_BASE=http://127.0.0.1:8317 pnpm dev
 ```
 
 ---
@@ -255,6 +256,5 @@ Per-key `allow_models_endpoint`: **binary** — deny (401) or full global list. 
 
 ```bash
 go test ./...
-cd web && npm test && npm run build
+cd web && pnpm test && pnpm build
 ```
-

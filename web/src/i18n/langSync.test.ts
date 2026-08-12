@@ -1,11 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  initLangSync,
-  _resolveLocale,
-  _parseStoredLanguage,
-  _teardownLangSync,
-} from "./langSync";
-import { getLocale, setLocale, _resetLocale } from "./index";
+import { _resetLocale, getLocale, setLocale } from "./index";
+import { _parseStoredLanguage, _resolveLocale, _teardownLangSync, initLangSync } from "./langSync";
 
 // langSync reads window.parent.document.documentElement[lang] and the shared
 // `cli-proxy-language` localStorage. jsdom gives us a real document but no
@@ -76,14 +71,20 @@ describe("resolveLocale (embedded)", () => {
     const parentHtml = document.createElement("html");
     parentHtml.setAttribute("lang", "ru");
     setEmbedded(true, parentHtml);
-    localStorage.setItem("cli-proxy-language", JSON.stringify({ state: { language: "en" }, version: 0 }));
+    localStorage.setItem(
+      "cli-proxy-language",
+      JSON.stringify({ state: { language: "en" }, version: 0 }),
+    );
     expect(_resolveLocale()).toBe("ru");
   });
 
   it("falls back to stored language when parent has no lang attr", () => {
     const parentHtml = document.createElement("html");
     setEmbedded(true, parentHtml);
-    localStorage.setItem("cli-proxy-language", JSON.stringify({ state: { language: "zh-TW" }, version: 0 }));
+    localStorage.setItem(
+      "cli-proxy-language",
+      JSON.stringify({ state: { language: "zh-TW" }, version: 0 }),
+    );
     expect(_resolveLocale()).toBe("zh-TW");
   });
 

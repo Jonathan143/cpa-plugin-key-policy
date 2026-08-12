@@ -83,7 +83,7 @@ export function obfuscateData(value: string): string {
 
 // Deobfuscation, identical to the panel's deobfuscateData().
 export function deobfuscateData(payload: string): string {
-  if (!payload || !payload.startsWith(ENC_PREFIX)) return payload;
+  if (!payload?.startsWith(ENC_PREFIX)) return payload;
   try {
     const encrypted = fromBase64(payload.slice(ENC_PREFIX.length));
     return decodeText(xorBytes(encrypted, getKeyBytes()));

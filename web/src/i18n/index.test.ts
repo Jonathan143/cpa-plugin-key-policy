@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  _resetLocale,
   getLocale,
+  isSupportedLocale,
   setLocale,
   subscribe,
   translate,
-  _resetLocale,
-  isSupportedLocale,
 } from "./index";
 
 afterEach(() => {
@@ -81,7 +81,9 @@ describe("locale store", () => {
   it("skips notify when setting the current locale again", () => {
     _resetLocale("en");
     let calls = 0;
-    const unsub = subscribe(() => { calls++; });
+    const unsub = subscribe(() => {
+      calls++;
+    });
     setLocale("en"); // same → should NOT notify
     expect(calls).toBe(0);
     setLocale("zh-CN"); // different → notify
@@ -92,7 +94,9 @@ describe("locale store", () => {
   it("subscribe notifies on locale change and unsub stops it", () => {
     _resetLocale("en");
     let calls = 0;
-    const unsub = subscribe(() => { calls++; });
+    const unsub = subscribe(() => {
+      calls++;
+    });
     setLocale("ru");
     expect(calls).toBe(1);
     unsub();

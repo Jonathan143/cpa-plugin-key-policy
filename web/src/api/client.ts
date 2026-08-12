@@ -1,17 +1,17 @@
-import axios, { AxiosInstance } from "axios";
-import { getSession, clearSession } from "../store/session";
+import axios, { type AxiosInstance } from "axios";
+import { clearSession, getSession } from "../store/session";
 
 // Build a fresh client per request using the current in-memory session.
 // We avoid a singleton so that login/logout switches take effect immediately.
 export function apiClient(): AxiosInstance {
   const s = getSession();
-  if (!s || !s.baseUrl) {
+  if (!s?.baseUrl) {
     throw new Error("not authenticated");
   }
   const instance = axios.create({
     baseURL: s.baseUrl,
     headers: {
-      Authorization: "Bearer " + s.secretKey,
+      Authorization: `Bearer ${s.secretKey}`,
       "Content-Type": "application/json",
     },
     // Validate status: treat 401/403 as auth failure -> force re-login.
@@ -36,4 +36,3 @@ const PLUGIN_BASE = "/v0/management/plugins/cpa-key-policy";
 export function pluginPath(suffix: string): string {
   return PLUGIN_BASE + suffix;
 }
-

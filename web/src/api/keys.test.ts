@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { buildModelRules } from "./keys";
 
 describe("buildModelRules", () => {
@@ -27,15 +27,11 @@ describe("buildModelRules", () => {
       { provider: "p", model: "" },
       { provider: "p", model: "ok" },
     ]);
-    expect(rules).toEqual([
-      { alias: "ok", provider: "p", target_model: "ok" },
-    ]);
+    expect(rules).toEqual([{ alias: "ok", provider: "p", target_model: "ok" }]);
   });
 
   it("trims whitespace", () => {
     const rules = buildModelRules([{ provider: "  codex  ", model: "  gpt-5  " }]);
-    expect(rules).toEqual([
-      { alias: "gpt-5", provider: "codex", target_model: "gpt-5" },
-    ]);
+    expect(rules).toEqual([{ alias: "gpt-5", provider: "codex", target_model: "gpt-5" }]);
   });
 });

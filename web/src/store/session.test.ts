@@ -1,11 +1,5 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import {
-  setSession,
-  clearSession,
-  getSession,
-  isAuthed,
-  subscribe,
-} from "./session";
+import { beforeEach, describe, expect, it } from "vitest";
+import { clearSession, getSession, isAuthed, setSession, subscribe } from "./session";
 
 beforeEach(() => clearSession());
 
@@ -19,24 +13,24 @@ describe("session storage", () => {
     setSession("http://localhost:8317/", "secret-xyz");
     const s = getSession();
     expect(s).not.toBeNull();
-    expect(s!.baseUrl).toBe("http://localhost:8317");
-    expect(s!.secretKey).toBe("secret-xyz");
+    expect(s?.baseUrl).toBe("http://localhost:8317");
+    expect(s?.secretKey).toBe("secret-xyz");
     expect(isAuthed()).toBe(true);
   });
 
   it("adds http:// scheme when missing", () => {
     setSession("127.0.0.1:8317", "k");
-    expect(getSession()!.baseUrl).toBe("http://127.0.0.1:8317");
+    expect(getSession()?.baseUrl).toBe("http://127.0.0.1:8317");
   });
 
   it("preserves https://", () => {
     setSession("https://cpa.example.com/", "k");
-    expect(getSession()!.baseUrl).toBe("https://cpa.example.com");
+    expect(getSession()?.baseUrl).toBe("https://cpa.example.com");
   });
 
   it("trims trailing slashes", () => {
     setSession("http://h:8317///", "k");
-    expect(getSession()!.baseUrl).toBe("http://h:8317");
+    expect(getSession()?.baseUrl).toBe("http://h:8317");
   });
 
   it("clears on logout", () => {

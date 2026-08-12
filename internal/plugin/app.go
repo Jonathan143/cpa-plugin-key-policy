@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ type App struct {
 }
 
 const classifyCacheCapacity = 4096
+
+var keyIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*$`)
 
 func NewApp() *App {
 	store := policy.NewStore()
@@ -596,6 +599,9 @@ func (a *App) createKey(body []byte) ManagementResponse {
 	req.ID = strings.TrimSpace(req.ID)
 	if req.ID == "" {
 		return jsonError(http.StatusBadRequest, "missing_id", "id is required")
+	}
+	if !keyIDPattern.MatchString(req.ID) {
+		return jsonError(http.StatusBadRequest, "invalid_id", "id must start with an English letter and contain only English letters, numbers, and hyphens")
 	}
 	plain := strings.TrimSpace(req.Key)
 	generated := false

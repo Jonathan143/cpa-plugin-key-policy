@@ -1,10 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import {
-  parseLiteLLM,
-  lookupPrice,
-  getPriceTable,
-  _resetPriceCache,
-} from "./modelPrices";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { _resetPriceCache, getPriceTable, lookupPrice, parseLiteLLM } from "./modelPrices";
 
 beforeEach(() => {
   _resetPriceCache();
@@ -22,9 +17,9 @@ describe("parseLiteLLM", () => {
     });
     const row = lookupPrice(table, "claude-3-5-sonnet-20241022");
     expect(row).not.toBeNull();
-    expect(row!.input_price_per_million).toBeCloseTo(3, 5);
-    expect(row!.output_price_per_million).toBeCloseTo(15, 5);
-    expect(row!.cache_read_price_per_million).toBeCloseTo(0.3, 5);
+    expect(row?.input_price_per_million).toBeCloseTo(3, 5);
+    expect(row?.output_price_per_million).toBeCloseTo(15, 5);
+    expect(row?.cache_read_price_per_million).toBeCloseTo(0.3, 5);
   });
 
   it("matches case-insensitively", () => {
@@ -48,9 +43,9 @@ describe("parseLiteLLM", () => {
     });
     const row = lookupPrice(table, "ai21.j2-mid-v1");
     expect(row).not.toBeNull();
-    expect(row!.input_price_per_million).toBeCloseTo(10, 5);
-    expect(row!.output_price_per_million).toBeCloseTo(12, 5);
-    expect(row!.cache_read_price_per_million).toBe(0);
+    expect(row?.input_price_per_million).toBeCloseTo(10, 5);
+    expect(row?.output_price_per_million).toBeCloseTo(12, 5);
+    expect(row?.cache_read_price_per_million).toBe(0);
   });
 
   it("skips sample_spec and non-object entries", () => {
@@ -76,7 +71,7 @@ describe("parseLiteLLM", () => {
   it("treats negative / non-finite costs as 0", () => {
     const n = Number.NaN;
     const table = parseLiteLLM({
-      "weird": {
+      weird: {
         input_cost_per_token: -1,
         output_cost_per_token: n,
         cache_read_input_token_cost: Infinity,
@@ -86,7 +81,7 @@ describe("parseLiteLLM", () => {
   });
 
   it("returns null for unknown / empty model", () => {
-    const table = parseLiteLLM({ "m": { input_cost_per_token: 1 } });
+    const table = parseLiteLLM({ m: { input_cost_per_token: 1 } });
     expect(lookupPrice(table, "nope")).toBeNull();
     expect(lookupPrice(table, "")).toBeNull();
     expect(lookupPrice(null, "m")).toBeNull();
@@ -117,7 +112,8 @@ describe("getPriceTable caching", () => {
     // cache written to sessionStorage as a stamped envelope
     const raw = sessionStorage.getItem("cpa-key-policy:litellm-prices");
     expect(raw).not.toBeNull();
-    const env = JSON.parse(raw!);
+    if (raw === null) throw new Error("Expected the price cache to be stored");
+    const env = JSON.parse(raw);
     expect(typeof env.fetchedAt).toBe("number");
     expect(Array.isArray(env.table)).toBe(true);
   });
@@ -140,15 +136,29 @@ describe("getPriceTable caching", () => {
     // seed an expired cache
     const expired = {
       fetchedAt: Date.now() - 25 * 60 * 60 * 1000, // 25h ago
-      table: [["stale-model", { input_price_per_million: 0, output_price_per_million: 0, cache_read_price_per_million: 0 }]],
+      table: [
+        [
+          "stale-model",
+          {
+            input_price_per_million: 0,
+            output_price_per_million: 0,
+            cache_read_price_per_million: 0,
+          },
+        ],
+      ],
     };
     sessionStorage.setItem("cpa-key-policy:litellm-prices", JSON.stringify(expired));
 
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ "fresh": { input_cost_per_token: 1, output_cost_per_token: 2 } }), { status: 200 }),
-      ),
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(
+            JSON.stringify({ fresh: { input_cost_per_token: 1, output_cost_per_token: 2 } }),
+            { status: 200 },
+          ),
+        ),
     );
 
     const t = await getPriceTable();
@@ -158,9 +168,11 @@ describe("getPriceTable caching", () => {
   });
 
   it("dedupes concurrent calls to a single fetch (inflight memo)", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ "x": { input_cost_per_token: 1 } }), { status: 200 }),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ x: { input_cost_per_token: 1 } }), { status: 200 }),
+      );
     vi.stubGlobal("fetch", fetchMock);
     const [a, b] = await Promise.all([getPriceTable(), getPriceTable()]);
     expect(a).not.toBeNull();

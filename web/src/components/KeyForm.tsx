@@ -1,11 +1,13 @@
-import { Fragment, useCallback, useEffect, useState, type ReactNode } from "react";
+import { Button, Chip, Input, Switch, Tooltip } from "@heroui/react";
+import { Gauge, KeyRound, Plus, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import type { KeyPublic, ModelRule, AliasMapping } from "../types";
-import ModelPicker from "./ModelPicker";
-import { getPriceTable, lookupPrice, type PriceTable } from "../store/modelPrices";
 import { fetchAliases } from "../api/mappings";
 import { formatTierLabel } from "../api/models";
 import { useT } from "../i18n";
+import { getPriceTable, lookupPrice, type PriceTable } from "../store/modelPrices";
+import type { AliasMapping, KeyPublic, ModelRule } from "../types";
+import ModelPicker from "./ModelPicker";
 
 export interface KeyFormValues {
   id: string;
@@ -15,9 +17,6 @@ export interface KeyFormValues {
   models: ModelRule[];
   daily_limit_usd: number;
   weekly_limit_usd: number;
-  // Per-key override for GET /v1/models. CPA cannot filter the model list per
-  // downstream key, so the only plugin-enforceable choice is binary: 401 (hide
-  // the list) or allow (client sees the full global list). Default false.
   allow_models_endpoint?: boolean;
 }
 
@@ -25,47 +24,65 @@ interface Props {
   initial?: KeyPublic;
   idReadOnly?: boolean;
   submitLabel: string;
-  onSubmit: (v: KeyFormValues) => Promise<void>;
+  onSubmit: (value: KeyFormValues) => Promise<void>;
   onCancel: () => void;
-  // top-level error to render
   error?: string;
-  // route path for the standalone model-picker page (e.g. "/keys/new/models").
-  // When set, the desktop form renders a chip box + "add model" button that
-  // navigates here with the current models as router state. The picker page
-  // navigates back with state.pickedModels, which the parent merges into
-  // `initial` before re-rendering this form.
   pickPath?: string;
-  // extra-danger button config for the footer (edit mode). When provided,
-  // renders a danger-outline button on the far right of the footer.
   dangerLabel?: string;
   onDanger?: () => void;
+  wizard?: boolean;
+  wizardInitialStep?: number;
+  draftKey?: string;
+  preferInitialModels?: boolean;
 }
 
-// Pricing for a single alias, kept in form state alongside the model selection.
 interface PriceRow {
   input_price_per_million: number;
   output_price_per_million: number;
   cache_read_price_per_million: number;
-  // per-call billing toggle + fixed charge. billing_mode "tokens" (default)
-  // uses the three token prices; "per_call" uses per_call_usd per successful
-  // request and ignores the token prices (kept dormant for round-tripping).
   billing_mode: "tokens" | "per_call";
   per_call_usd: number;
 }
 
-// Price-map key. A model selected under different tiers (codex free vs team)
-// produces two ModelRules with the SAME alias but different groups — pricing
-// must be tracked per (group, alias) so each row keeps its own numbers. The
-// group prefix (lowercased) disambiguates; aliases without a group use the
-// alias alone, preserving the legacy key shape for non-tiered providers.
-function priceKey(m: { alias: string; group?: string }): string {
-  const g = (m.group ?? "").toLowerCase();
-  return (g ? g + "|" : "") + m.alias.toLowerCase();
+function priceKey(model: { alias: string; group?: string }): string {
+  const group = (model.group ?? "").toLowerCase();
+  return (group ? `${group}|` : "") + model.alias.toLowerCase();
 }
 
 function parseNum(value: string): number {
-  const n = parseFloat(value);
-  return Number.isFinite(n) ? n : 0;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+const emptyPrice: PriceRow = {
+  input_price_per_million: 0,
+  output_price_per_million: 0,
+  cache_read_price_per_million: 0,
+  billing_mode: "tokens",
+  per_call_usd: 0,
+};
+
+const numberClass =
+  "min-h-10 w-full rounded-xl border border-[var(--field-border)] bg-[var(--field-background)] px-3 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--accent)] focus:ring-3 focus:ring-[var(--accent-soft)]";
+const labelClass = "mb-1.5 block text-xs font-semibold text-[var(--muted)]";
+const keyIdPattern = /^[A-Za-z][A-Za-z0-9-]*$/;
+const keyIdCharacters = "abcdefghijklmnopqrstuvwxyz0123456789";
+const reviewModelDisplayLimit = 4;
+const wizardMaxStep = 2;
+const wizardDraftVersion = 2;
+
+function restoreWizardStep(step: number, version?: number): number {
+  const restored = version === wizardDraftVersion ? step : step === 0 ? 0 : step - 1;
+  return Math.max(0, Math.min(wizardMaxStep, restored));
+}
+
+function generateKeyId(): string {
+  const randomBytes = crypto.getRandomValues(new Uint8Array(8));
+  const suffix = Array.from(
+    randomBytes,
+    (value) => keyIdCharacters[value % keyIdCharacters.length],
+  ).join("");
+  return `key-${suffix}`;
 }
 
 export default function KeyForm({
@@ -78,202 +95,274 @@ export default function KeyForm({
   pickPath,
   dangerLabel,
   onDanger,
+  wizard = false,
+  wizardInitialStep = 0,
+  draftKey,
+  preferInitialModels = false,
 }: Props) {
   const nav = useNavigate();
+  const t = useT();
   const [id, setId] = useState(initial?.id ?? "");
   const [name, setName] = useState(initial?.name ?? "");
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [rpm, setRpm] = useState(initial?.rpm ?? 0);
   const [dailyLimit, setDailyLimit] = useState(initial?.daily_limit_usd ?? 0);
   const [weeklyLimit, setWeeklyLimit] = useState(initial?.weekly_limit_usd ?? 0);
-  const [allowModels, setAllowModels] = useState<boolean>(initial?.allow_models_endpoint ?? false);
-  const t = useT();
-
-  // Pricing table keyed by alias (lowercased) so it survives picker re-emits.
-  const [prices, setPrices] = useState<Record<string, PriceRow>>(() => {
-    const out: Record<string, PriceRow> = {};
-    for (const m of initial?.models ?? []) {
-      out[priceKey(m)] = {
-        input_price_per_million: m.input_price_per_million ?? 0,
-        output_price_per_million: m.output_price_per_million ?? 0,
-        cache_read_price_per_million: m.cache_read_price_per_million ?? 0,
-        billing_mode: m.billing_mode === "per_call" ? "per_call" : "tokens",
-        per_call_usd: m.per_call_usd ?? 0,
-      };
-    }
-    return out;
-  });
+  const [allowModels, setAllowModels] = useState(initial?.allow_models_endpoint ?? false);
   const [models, setModels] = useState<ModelRule[]>(initial?.models ?? []);
-  const [busy, setBusy] = useState(false);
-  const [localErr, setLocalErr] = useState("");
-  const [expandedPrice, setExpandedPrice] = useState<Record<string, boolean>>({});
-
-  // Global alias table (fetched once on mount). Used by the "已有别名" section
-  // so the user can quickly include an alias's targets instead of picking
-  // each provider+model+group individually from the catalog. Clicking a
-  // global alias adds ALL its targets as ModelRules (so round-robin can rotate
-  // across them); the backend ups-server dedups by alias+provider+target_model
-  // so it reuses the existing global alias instead of creating a duplicate.
+  const [prices, setPrices] = useState<Record<string, PriceRow>>(() =>
+    Object.fromEntries(
+      (initial?.models ?? []).map((model) => [
+        priceKey(model),
+        {
+          input_price_per_million: model.input_price_per_million ?? 0,
+          output_price_per_million: model.output_price_per_million ?? 0,
+          cache_read_price_per_million: model.cache_read_price_per_million ?? 0,
+          billing_mode: model.billing_mode === "per_call" ? "per_call" : "tokens",
+          per_call_usd: model.per_call_usd ?? 0,
+        },
+      ]),
+    ),
+  );
   const [globalAliases, setGlobalAliases] = useState<AliasMapping[]>([]);
-  useEffect(() => {
-    let alive = true;
-    void fetchAliases().then((list) => { if (alive) setGlobalAliases(list); }).catch(() => {});
-    return () => { alive = false; };
-  }, []);
-
-  // aliasSelected reports whether every target of `a` is already in `models`
-  // (i.e. the alias is fully included).
-  const aliasSelected = useCallback((a: AliasMapping) => {
-    return a.targets.every((tgt) =>
-      models.some((m) =>
-        m.alias.toLowerCase() === a.alias.toLowerCase() &&
-        m.provider.toLowerCase() === tgt.provider.toLowerCase() &&
-        m.target_model.toLowerCase() === tgt.target_model.toLowerCase() &&
-        (m.group ?? "").toLowerCase() === (tgt.group ?? "").toLowerCase(),
-      ),
-    );
-  }, [models]);
-
-  // toggleAlias either adds all of an alias's targets (as ModelRules, with the
-  // alias's pricing stamped in) or removes all of them.
-  const toggleAlias = useCallback((a: AliasMapping) => {
-    if (aliasSelected(a)) {
-      // Remove all targets of this alias.
-      setModels((prev) => prev.filter((m) =>
-        !(m.alias.toLowerCase() === a.alias.toLowerCase()),
-      ));
-      setPrices((prev) => {
-        const next = { ...prev };
-        for (const tgt of a.targets) {
-          const k = priceKey({ alias: a.alias, group: tgt.group });
-          delete next[k];
-        }
-        return next;
-      });
-    } else {
-      // Add all targets.
-      const newRules: ModelRule[] = a.targets.map((tgt) => ({
-        alias: a.alias,
-        provider: tgt.provider,
-        target_model: tgt.target_model,
-        group: tgt.group ?? "",
-        billing_mode: a.billing_mode === "per_call" ? "per_call" : "tokens",
-        input_price_per_million: a.input_price_per_million ?? 0,
-        output_price_per_million: a.output_price_per_million ?? 0,
-        cache_read_price_per_million: a.cache_read_price_per_million ?? 0,
-        per_call_usd: a.per_call_usd ?? 0,
-      }));
-      setModels((prev) => {
-        // Drop any partial entries for this alias first, then append all targets.
-        const filtered = prev.filter((m) => m.alias.toLowerCase() !== a.alias.toLowerCase());
-        return [...filtered, ...newRules];
-      });
-      setPrices((prev) => {
-        const next = { ...prev };
-        for (const tgt of a.targets) {
-          next[priceKey({ alias: a.alias, group: tgt.group })] = {
-            input_price_per_million: a.input_price_per_million ?? 0,
-            output_price_per_million: a.output_price_per_million ?? 0,
-            cache_read_price_per_million: a.cache_read_price_per_million ?? 0,
-            billing_mode: a.billing_mode === "per_call" ? "per_call" : "tokens",
-            per_call_usd: a.per_call_usd ?? 0,
-          };
-        }
-        return next;
-      });
-    }
-  }, [aliasSelected]);
-
-  // LiteLLM price hints (community price table). Loaded once on mount, silent
-  // failure: if null/inflight, the per-row "recommend" affordance simply isn't
-  // rendered. The form is fully usable without it. Never auto-fills prices —
-  // the user must click "recommend" per row (replace semantics, overwrites
-  // whatever was in that row).
   const [priceTable, setPriceTable] = useState<PriceTable | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [localError, setLocalError] = useState("");
+  const [wizardStep, setWizardStep] = useState(
+    Math.max(0, Math.min(wizardMaxStep, wizardInitialStep)),
+  );
+  const [draftReady, setDraftReady] = useState(!draftKey);
+
   useEffect(() => {
     let alive = true;
-    void getPriceTable().then((t) => {
-      if (alive) setPriceTable(t);
+    void fetchAliases()
+      .then((items) => {
+        if (alive) setGlobalAliases(items);
+      })
+      .catch(() => {});
+    void getPriceTable().then((table) => {
+      if (alive) setPriceTable(table);
     });
     return () => {
       alive = false;
     };
   }, []);
 
-  // ModelPicker emits fresh ModelRule[] on every selection change (and once
-  // when the catalog finishes loading). We must NOT let those re-emits wipe
-  // pricing the user already typed: when merging, preserve existing rows and
-  // only (a) add empty rows for newly-selected aliases, (b) drop rows for
-  // aliases that are no longer selected. Keys already present are copied
-  // through untouched. Wrapped in useCallback so ModelPicker's emit effect
-  // does not re-fire on every KeyForm re-render (which would otherwise loop
-  // and risk dropping mid-typing values).
+  useEffect(() => {
+    if (!draftKey) return;
+    try {
+      const raw = sessionStorage.getItem(`cpa-key-policy:${draftKey}`);
+      if (raw) {
+        const draft = JSON.parse(raw) as Partial<KeyFormValues> & {
+          prices?: Record<string, PriceRow>;
+          wizardStep?: number;
+          wizardVersion?: number;
+        };
+        if (draft.id !== undefined) setId(draft.id);
+        if (draft.name !== undefined) setName(draft.name);
+        if (draft.enabled !== undefined) setEnabled(draft.enabled);
+        if (draft.rpm !== undefined) setRpm(draft.rpm);
+        if (draft.daily_limit_usd !== undefined) setDailyLimit(draft.daily_limit_usd);
+        if (draft.weekly_limit_usd !== undefined) setWeeklyLimit(draft.weekly_limit_usd);
+        if (draft.allow_models_endpoint !== undefined) setAllowModels(draft.allow_models_endpoint);
+        if (draft.models && !preferInitialModels) setModels(draft.models);
+        if (draft.prices && !preferInitialModels) setPrices(draft.prices);
+        if (wizard && draft.wizardStep !== undefined) {
+          setWizardStep(restoreWizardStep(draft.wizardStep, draft.wizardVersion));
+        }
+      }
+    } catch {
+      // Session draft recovery is best-effort.
+    }
+    setDraftReady(true);
+  }, [draftKey, preferInitialModels, wizard]);
+
+  useEffect(() => {
+    if (!draftKey || !draftReady) return;
+    try {
+      sessionStorage.setItem(
+        `cpa-key-policy:${draftKey}`,
+        JSON.stringify({
+          id,
+          name,
+          enabled,
+          rpm,
+          models,
+          daily_limit_usd: dailyLimit,
+          weekly_limit_usd: weeklyLimit,
+          allow_models_endpoint: allowModels,
+          prices,
+          wizardStep,
+          wizardVersion: wizardDraftVersion,
+        }),
+      );
+    } catch {
+      // The form remains usable when session storage is unavailable.
+    }
+  }, [
+    allowModels,
+    dailyLimit,
+    draftKey,
+    draftReady,
+    enabled,
+    id,
+    models,
+    name,
+    prices,
+    rpm,
+    weeklyLimit,
+    wizardStep,
+  ]);
+
+  const clearDraft = () => {
+    if (!draftKey) return;
+    try {
+      sessionStorage.removeItem(`cpa-key-policy:${draftKey}`);
+    } catch {
+      /* optional recovery state */
+    }
+  };
+
   const handleModelsChange = useCallback((next: ModelRule[]) => {
     setModels(next);
-    setPrices((prev) => {
-      const updated: Record<string, PriceRow> = {};
-      for (const m of next) {
-        const key = priceKey(m);
-        updated[key] = prev[key] ?? { input_price_per_million: 0, output_price_per_million: 0, cache_read_price_per_million: 0, billing_mode: "tokens", per_call_usd: 0 };
-      }
-      // Rows for (group,alias) pairs no longer selected simply aren't copied.
-      return updated;
-    });
+    setPrices((previous) =>
+      Object.fromEntries(
+        next.map((model) => [priceKey(model), previous[priceKey(model)] ?? emptyPrice]),
+      ),
+    );
   }, []);
 
-  const setPrice = (m: ModelRule, field: keyof PriceRow, value: string) => {
-    const key = priceKey(m);
-    setPrices((prev) => ({
-      ...prev,
-      [key]: {
-        ...(prev[key] ?? { input_price_per_million: 0, output_price_per_million: 0, cache_read_price_per_million: 0, billing_mode: "tokens", per_call_usd: 0 }),
-        [field]: field === "billing_mode" ? (value === "per_call" ? "per_call" : "tokens") : parseNum(value),
-      },
-    }));
-  };
+  const aliasSelected = useCallback(
+    (alias: AliasMapping) =>
+      alias.targets.every((target) =>
+        models.some(
+          (model) =>
+            model.alias.toLowerCase() === alias.alias.toLowerCase() &&
+            model.provider.toLowerCase() === target.provider.toLowerCase() &&
+            model.target_model.toLowerCase() === target.target_model.toLowerCase() &&
+            (model.group ?? "").toLowerCase() === (target.group ?? "").toLowerCase(),
+        ),
+      ),
+    [models],
+  );
 
-  // One-click fill this row from LiteLLM community prices. Replace semantics:
-  // overwrites all three fields (even non-zero user-entered ones). Lookup is by
-  // target_model (the real upstream id); the price writes back to this row's
-  // (group, alias) key, so a same-alias row under a different tier is untouched.
-  const recommend = (m: ModelRule) => {
-    const row = lookupPrice(priceTable, m.target_model);
-    if (!row) return;
-    const key = priceKey(m);
-    setPrices((prev) => ({
-      ...prev,
-      [key]: {
-        input_price_per_million: row.input_price_per_million,
-        output_price_per_million: row.output_price_per_million,
-        cache_read_price_per_million: row.cache_read_price_per_million,
-        // Recommend fills token prices; it does not change the billing mode. If
-        // the row was on per_call, keep it (the recommended token prices stay
-        // dormant until the user switches back to tokens).
-        billing_mode: prev[key]?.billing_mode ?? "tokens",
-        per_call_usd: prev[key]?.per_call_usd ?? 0,
-      },
-    }));
-  };
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLocalErr("");
-    if (!id.trim()) {
-      setLocalErr(t("keyForm.idRequired"));
+  const toggleAlias = (alias: AliasMapping) => {
+    if (aliasSelected(alias)) {
+      handleModelsChange(
+        models.filter((model) => model.alias.toLowerCase() !== alias.alias.toLowerCase()),
+      );
       return;
     }
-    // Stamp the per-alias pricing back onto the model rules before submit.
-    const pricedModels: ModelRule[] = models.map((m) => {
-      const row = prices[priceKey(m)];
-      return {
-        ...m,
-        input_price_per_million: row?.input_price_per_million ?? 0,
-        output_price_per_million: row?.output_price_per_million ?? 0,
-        cache_read_price_per_million: row?.cache_read_price_per_million ?? 0,
-        billing_mode: row?.billing_mode === "per_call" ? "per_call" : "tokens",
-        per_call_usd: row?.per_call_usd ?? 0,
-      };
+    const nextRules: ModelRule[] = alias.targets.map((target) => ({
+      alias: alias.alias,
+      provider: target.provider,
+      target_model: target.target_model,
+      group: target.group ?? "",
+      billing_mode: alias.billing_mode,
+      input_price_per_million: alias.input_price_per_million ?? 0,
+      output_price_per_million: alias.output_price_per_million ?? 0,
+      cache_read_price_per_million: alias.cache_read_price_per_million ?? 0,
+      per_call_usd: alias.per_call_usd ?? 0,
+    }));
+    const retained = models.filter(
+      (model) => model.alias.toLowerCase() !== alias.alias.toLowerCase(),
+    );
+    setModels([...retained, ...nextRules]);
+    setPrices((previous) => {
+      const next = { ...previous };
+      for (const target of alias.targets)
+        next[priceKey({ alias: alias.alias, group: target.group })] = {
+          input_price_per_million: alias.input_price_per_million ?? 0,
+          output_price_per_million: alias.output_price_per_million ?? 0,
+          cache_read_price_per_million: alias.cache_read_price_per_million ?? 0,
+          billing_mode: alias.billing_mode,
+          per_call_usd: alias.per_call_usd ?? 0,
+        };
+      return next;
     });
+  };
+
+  const setPrice = (model: ModelRule, field: keyof PriceRow, value: string) => {
+    const key = priceKey(model);
+    setPrices((previous) => ({
+      ...previous,
+      [key]: {
+        ...(previous[key] ?? emptyPrice),
+        [field]:
+          field === "billing_mode"
+            ? value === "per_call"
+              ? "per_call"
+              : "tokens"
+            : parseNum(value),
+      },
+    }));
+  };
+
+  const recommend = (model: ModelRule) => {
+    const suggestion = lookupPrice(priceTable, model.target_model);
+    if (!suggestion) return;
+    const key = priceKey(model);
+    setPrices((previous) => ({
+      ...previous,
+      [key]: {
+        ...previous[key],
+        input_price_per_million: suggestion.input_price_per_million,
+        output_price_per_million: suggestion.output_price_per_million,
+        cache_read_price_per_million: suggestion.cache_read_price_per_million,
+      },
+    }));
+  };
+
+  const uniqueModels = useMemo(
+    () =>
+      models.filter(
+        (model, index, all) =>
+          all.findIndex((candidate) => priceKey(candidate) === priceKey(model)) === index,
+      ),
+    [models],
+  );
+  const reviewModelNames = useMemo(
+    () => [...new Set(models.map((model) => model.alias))],
+    [models],
+  );
+  const visibleReviewModels = reviewModelNames.slice(0, reviewModelDisplayLimit);
+  const hiddenReviewModelCount = reviewModelNames.length - visibleReviewModels.length;
+
+  const openPicker = () => {
+    if (!pickPath) return;
+    nav(pickPath, {
+      state: {
+        models,
+        draft: {
+          id,
+          name,
+          enabled,
+          rpm,
+          daily_limit_usd: dailyLimit,
+          weekly_limit_usd: weeklyLimit,
+          allow_models_endpoint: allowModels,
+          prices,
+        },
+      },
+    });
+  };
+
+  const validateId = (): boolean => {
+    if (idReadOnly) return true;
+    if (!id.trim()) {
+      setLocalError(t("keyForm.idRequired"));
+      return false;
+    }
+    if (!keyIdPattern.test(id.trim())) {
+      setLocalError(t("keyForm.idInvalid"));
+      return false;
+    }
+    return true;
+  };
+
+  const submit = async () => {
+    setLocalError("");
+    if (!validateId()) return;
     setBusy(true);
     try {
       await onSubmit({
@@ -281,568 +370,555 @@ export default function KeyForm({
         name: name.trim(),
         enabled,
         rpm,
-        models: pricedModels,
         daily_limit_usd: dailyLimit,
         weekly_limit_usd: weeklyLimit,
         allow_models_endpoint: allowModels,
+        models: models.map((model) => ({ ...model, ...(prices[priceKey(model)] ?? emptyPrice) })),
       });
-    } catch (err) {
-      const e = err as { response?: { data?: { error?: { message?: string } } }; message?: string };
-      setLocalErr(e.response?.data?.error?.message ?? e.message ?? t("keyForm.submitFailed"));
+      clearDraft();
+    } catch (caught) {
+      const value = caught as {
+        response?: { data?: { error?: { message?: string } } };
+        message?: string;
+      };
+      setLocalError(
+        value.response?.data?.error?.message ?? value.message ?? t("keyForm.submitFailed"),
+      );
     } finally {
       setBusy(false);
     }
   };
 
-  const toggleExpanded = (key: string) => {
-    setExpandedPrice((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
-
-  const renderPriceEditor = (m: ModelRule, layout: "table" | "mobile") => {
-    const key = priceKey(m);
-    // All ModelRules sharing this (group|alias) key — for a multi-target
-    // global alias they all share one unified price row. The desktop table
-    // renders one row per unique key (see the body filter below) and shows
-    // the aggregated provider/group set so the user sees it's one unified
-    // price across multiple targets, not a per-target price.
-    const sameKey = models.filter((x) => priceKey(x) === key);
-    const isMulti = sameKey.length > 1;
-      const providersUnion = Array.from(new Set(sameKey.map((x) => x.provider))).join(", ");
-      const groupsUnionRaw = Array.from(new Set(sameKey.map((x) => (x.group ?? "").trim()).filter(Boolean)));
-      const groupsUnion = groupsUnionRaw.length
-        ? groupsUnionRaw.map((g) => formatTierLabel(t, g)).join(", ")
-        : "—";
-    const row = prices[key] ?? {
-      input_price_per_million: 0,
-      output_price_per_million: 0,
-      cache_read_price_per_million: 0,
-      billing_mode: "tokens" as const,
-      per_call_usd: 0,
-    };
-    const perCall = row.billing_mode === "per_call";
-    // Community price hint only makes sense for a single target (one
-    // target_model); for multi-target aliases the price is unified across
-    // different models so auto-fill is meaningless.
-    const hint = priceTable && !isMulti ? lookupPrice(priceTable, m.target_model) : null;
-
-    if (layout === "mobile") {
-      return (
-        <div className="kf-mprice-body">
-          <div className="seg kf-billing-seg" role="group" aria-label={t("keyForm.colBillingMode")}>
-            <button
-              type="button"
-              className={"seg-btn" + (perCall ? "" : " active")}
-              onClick={() => setPrice(m, "billing_mode", "tokens")}
-            >
-              {t("keyForm.billingTokens")}
-            </button>
-            <button
-              type="button"
-              className={"seg-btn" + (perCall ? " active" : "")}
-              onClick={() => setPrice(m, "billing_mode", "per_call")}
-            >
-              {t("keyForm.billingPerCall")}
-            </button>
-          </div>
-          {perCall ? (
-            <div className="form-row">
-              <label>{t("keyForm.colPerCall")}</label>
-              <input
-                className="input"
-                type="number"
-                min={0}
-                step="0.0001"
-                value={row.per_call_usd}
-                onChange={(e) => setPrice(m, "per_call_usd", e.target.value)}
-              />
-            </div>
-          ) : (
-            <>
-              <div className="form-row">
-                <label>{t("keyForm.colInput")}</label>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={row.input_price_per_million}
-                  onChange={(e) => setPrice(m, "input_price_per_million", e.target.value)}
-                />
-              </div>
-              <div className="form-row">
-                <label>{t("keyForm.colOutput")}</label>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={row.output_price_per_million}
-                  onChange={(e) => setPrice(m, "output_price_per_million", e.target.value)}
-                />
-              </div>
-              <div className="form-row">
-                <label title={t("keyForm.colCacheReadHint")}>{t("keyForm.colCacheRead")}</label>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={row.cache_read_price_per_million}
-                  onChange={(e) => setPrice(m, "cache_read_price_per_million", e.target.value)}
-                />
-              </div>
-              {hint && (
-                <button
-                  type="button"
-                  className="btn sm"
-                  onClick={() => recommend(m)}
-                  title={t("keyForm.recommendTitle")}
-                >
-                  {t("keyForm.recommend")}
-                </button>
-              )}
-            </>
-          )}
-          {perCall && row.per_call_usd === 0 && (
-            <p className="muted kf-warn">⚠ {t("keyForm.perCallZeroWarn")}</p>
-          )}
-          {perCall && <p className="muted kf-warn">⚠ {t("keyForm.perCallImageWarn")}</p>}
-        </div>
-      );
-    }
-
-    return (
-      <Fragment key={key}>
-        <tr>
-          <td className="mono">{m.alias}{isMulti ? ` (${sameKey.length})` : ""}</td>
-          <td className="muted">{isMulti ? providersUnion : m.provider}</td>
-          <td className="muted">{isMulti ? groupsUnion : (m.group ? formatTierLabel(t, m.group) : "—")}</td>
-          <td>
-            <label className="switch" title={t("keyForm.billingModeTitle")}>
-              <input
-                type="checkbox"
-                checked={perCall}
-                onChange={(e) => setPrice(m, "billing_mode", e.target.checked ? "per_call" : "tokens")}
-              />
-              <span className="track"><span className="thumb" /></span>
-              <span>{perCall ? t("keyForm.billingPerCall") : t("keyForm.billingTokens")}</span>
-            </label>
-          </td>
-          {perCall ? (
-            <td colSpan={3}>
-              <div className="form-row" style={{ marginBottom: 0 }}>
-                <label>{t("keyForm.colPerCall")}</label>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  step="0.0001"
-                  value={row.per_call_usd}
-                  onChange={(e) => setPrice(m, "per_call_usd", e.target.value)}
-                />
-              </div>
-            </td>
-          ) : (
-            <>
-              <td>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={row.input_price_per_million}
-                  onChange={(e) => setPrice(m, "input_price_per_million", e.target.value)}
-                />
-              </td>
-              <td>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={row.output_price_per_million}
-                  onChange={(e) => setPrice(m, "output_price_per_million", e.target.value)}
-                />
-              </td>
-              <td>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={row.cache_read_price_per_million}
-                  onChange={(e) => setPrice(m, "cache_read_price_per_million", e.target.value)}
-                />
-              </td>
-            </>
-          )}
-          <td>
-            {!perCall && hint && (
-              <button
-                type="button"
-                className="btn sm"
-                onClick={() => recommend(m)}
-                title={t("keyForm.recommendTitle")}
-              >
-                {t("keyForm.recommend")}
-              </button>
-            )}
-          </td>
-        </tr>
-        {perCall && row.per_call_usd === 0 && (
-          <tr className="muted">
-            <td colSpan={8} style={{ fontSize: "0.85em" }}>
-              ⚠ {t("keyForm.perCallZeroWarn")}
-            </td>
-          </tr>
-        )}
-        {perCall && (
-          <tr className="muted">
-            <td colSpan={8} style={{ fontSize: "0.85em" }}>
-              ⚠ {t("keyForm.perCallImageWarn")}
-            </td>
-          </tr>
-        )}
-      </Fragment>
-    );
-  };
-
-  const section = (title: string, children: ReactNode) => (
-    <section className="kf-section mobile-only">
-      <div className="section-label">{title}</div>
-      <div className="kf-section-card">{children}</div>
-    </section>
-  );
-
   return (
-    <form className="card key-form" onSubmit={submit}>
-      <div className="mobile-only kf-sections">
-        {section(t("keyForm.mobile.sectionBasic"), (
-          <>
-            <div className="form-row">
-              <label>{t("keyForm.idLabel")}</label>
-              <input
-                className={"input" + (idReadOnly ? " mono" : "")}
+    <form
+      className="grid gap-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+      noValidate
+    >
+      {wizard && (
+        <ol className="grid grid-cols-3 gap-2 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-sm">
+          {[
+            t("keyForm.mobile.sectionBasicLimits"),
+            t("keyForm.mobile.sectionModels"),
+            t("app.review"),
+          ].map((label, index) => (
+            <li
+              key={label}
+              className={`flex min-w-0 items-center gap-2 text-[10px] sm:text-xs ${index <= wizardStep ? "text-[var(--accent-soft-foreground)]" : "text-[var(--muted)]"}`}
+            >
+              <span
+                className={`grid size-6 shrink-0 place-items-center rounded-full ${index <= wizardStep ? "bg-[var(--accent)] text-white" : "bg-[var(--surface-secondary)]"}`}
+              >
+                {index + 1}
+              </span>
+              <span className="truncate max-sm:hidden">{label}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+      <section
+        id="overview"
+        className={`${wizard && wizardStep !== 0 ? "hidden" : ""} rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm sm:p-6`}
+      >
+        <div className="mb-5 flex items-center gap-3">
+          <span className="grid size-9 place-items-center rounded-xl bg-indigo-500/10 text-indigo-500">
+            <KeyRound size={18} />
+          </span>
+          <div>
+            <h2 className="text-base font-bold">{t("keyForm.mobile.sectionBasic")}</h2>
+            <p className="text-xs text-[var(--muted)]">{t("app.basicHint")}</p>
+          </div>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className={labelClass}>{t("keyForm.idLabel")}</label>
+            <div className="flex items-center gap-2">
+              <Input
                 value={id}
-                onChange={(e) => setId(e.target.value)}
+                onChange={(event) => {
+                  const nextId = event.target.value;
+                  if (idReadOnly || nextId === "" || keyIdPattern.test(nextId)) {
+                    setId(nextId);
+                    if (
+                      localError === t("keyForm.idRequired") ||
+                      localError === t("keyForm.idInvalid")
+                    ) {
+                      setLocalError("");
+                    }
+                    return;
+                  }
+                  setLocalError(t("keyForm.idInvalid"));
+                }}
                 readOnly={idReadOnly}
                 placeholder={t("keyForm.idPlaceholder")}
+                pattern="[A-Za-z][A-Za-z0-9-]*"
+                aria-describedby={!idReadOnly ? "key-id-hint" : undefined}
                 autoFocus={!idReadOnly}
+                fullWidth
+                className={idReadOnly ? "font-mono" : "min-w-0 flex-1"}
               />
+              {!idReadOnly && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="shrink-0"
+                  onPress={() => {
+                    setId(generateKeyId());
+                    if (
+                      localError === t("keyForm.idRequired") ||
+                      localError === t("keyForm.idInvalid")
+                    ) {
+                      setLocalError("");
+                    }
+                  }}
+                >
+                  <Sparkles size={14} />
+                  {t("keyForm.generateId")}
+                </Button>
+              )}
             </div>
-            <div className="form-row">
-              <label>{t("keyForm.nameLabel")}</label>
-              <input
-                className="input"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder={t("keyForm.namePlaceholder")}
-              />
-            </div>
-            <div className="form-row kf-switch-row">
-              <label className="switch">
-                <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-                <span className="track"><span className="thumb" /></span>
-                <span>{t("keyForm.enableKey")}</span>
-              </label>
-            </div>
-            <div className="form-row">
-              <label>{t("keyForm.rpmLabel")}</label>
-              <input
-                className="input"
-                type="number"
-                min={0}
-                value={rpm}
-                onChange={(e) => setRpm(parseInt(e.target.value || "0", 10) || 0)}
-              />
-            </div>
-          </>
-        ))}
-        {section(t("keyForm.mobile.sectionLimits"), (
-          <>
-            <div className="form-row">
-              <label>{t("keyForm.dailyLimitLabel")}</label>
-              <input
-                className="input"
-                type="number"
-                min={0}
-                step="0.01"
-                value={dailyLimit}
-                onChange={(e) => setDailyLimit(parseNum(e.target.value))}
-              />
-            </div>
-            <div className="form-row">
-              <label>{t("keyForm.weeklyLimitLabel")}</label>
-              <input
-                className="input"
-                type="number"
-                min={0}
-                step="0.01"
-                value={weeklyLimit}
-                onChange={(e) => setWeeklyLimit(parseNum(e.target.value))}
-              />
-            </div>
-          </>
-        ))}
-        {section(t("keyForm.mobile.sectionAccess"), (
-          <>
-            <label className="switch kf-access-switch" title={t("keyForm.allowModelsTitle")}>
-              <input type="checkbox" checked={allowModels} onChange={(e) => setAllowModels(e.target.checked)} />
-              <span className="track"><span className="thumb" /></span>
-              <span>{t("keyForm.allowModelsLabel")}</span>
-            </label>
-            <p className="muted kf-hint">{t("keyForm.allowModelsHint")}</p>
-          </>
-        ))}
-        <section className="kf-section mobile-only">
-          <div className="section-label">{t("keyForm.mobile.sectionModels")}</div>
-          {globalAliases.length > 0 && (
-            <div className="form-row kf-alias-pick" style={{ marginBottom: 12 }}>
-              <div className="kf-alias-chips">
-                {globalAliases.map((a) => {
-                  const on = aliasSelected(a);
-                  return (
-                  <button key={a.alias} type="button" className={"kf-alias-chip" + (on ? " selected" : "")} onClick={() => toggleAlias(a)}>
-                    {a.alias}{a.targets.length > 1 ? ` (${a.targets.length})` : ""}
-                  </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          <div className="form-row" style={{ marginBottom: 12 }}>
-            {pickPath ? (
-              <div className="model-chips-box">
-                {models.length === 0 && <span className="mc-empty">{t("keyForm.modelsEmpty")}</span>}
-                {models.map((m) => (
-                  <span key={priceKey(m)} className="mc-chip">
-                    {m.alias}{m.group ? " · " + formatTierLabel(t, m.group) : ""}
-                    <button type="button" className="mc-x" onClick={() => {
-                      setModels((prev) => prev.filter((x) => priceKey(x) !== priceKey(m)));
-                    }} aria-label={t("keyForm.removeModel")}>×</button>
-                  </span>
-                ))}
-                <button type="button" className="mc-add" onClick={() => nav(pickPath, { state: { models } })}>
-                  + {t("keyForm.addModel")}
-                </button>
-              </div>
-            ) : (
-              <ModelPicker initial={initial?.models} onChange={handleModelsChange} />
+            {!idReadOnly && (
+              <p id="key-id-hint" className="mb-0 mt-1.5 text-[10px] text-[var(--muted)]">
+                {t("keyForm.idHint")}
+              </p>
             )}
           </div>
-          {models.length > 0 && (
-            <div className="kf-model-list">
-              {models.map((m) => {
-                const key = priceKey(m);
-                const row = prices[key];
-                const perCall = row?.billing_mode === "per_call";
-                const open = !!expandedPrice[key];
-                return (
-                  <div key={key} className="kf-model-card">
-                    <button
-                      type="button"
-                      className="kf-model-head"
-                      onClick={() => toggleExpanded(key)}
-                      aria-expanded={open}
-                    >
-                      <div>
-                        <div className="kf-model-alias">{m.alias}</div>
-                        <div className="muted kf-model-meta">
-                          {m.provider}{m.group ? ` · ${formatTierLabel(t, m.group)}` : ""}
-                        </div>
-                        <div className="mono kf-model-target">{m.target_model}</div>
-                      </div>
-                      <span className={"mm-badge" + (perCall ? " per_call" : "")}>
-                        {perCall ? t("keyForm.billingPerCall") : t("keyForm.billingTokens")}
-                      </span>
-                      <span className="kf-chevron">{open ? "▾" : "▸"}</span>
-                    </button>
-                    {open && renderPriceEditor(m, "mobile")}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          <p className="muted kf-hint" style={{ marginTop: 8 }}>{t("keyForm.priceLabel")}</p>
-        </section>
-      </div>
-
-      <div className="mobile-hidden">
-      <div className="row2">
-        <div className="form-row">
-          <label>{t("keyForm.idLabel")}</label>
-          <input
-            className="input"
-            value={id}
-            onChange={(e) => setId(e.target.value)}
-            readOnly={idReadOnly}
-            placeholder={t("keyForm.idPlaceholder")}
-            autoFocus={!idReadOnly}
-          />
-        </div>
-        <div className="form-row">
-          <label>{t("keyForm.nameLabel")}</label>
-          <input
-            className="input"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder={t("keyForm.namePlaceholder")}
-          />
-        </div>
-      </div>
-      <div className="row2">
-        <div className="form-row">
-          <label>{t("keyForm.rpmLabel")}</label>
-          <input
-            className="input"
-            type="number"
-            min={0}
-            value={rpm}
-            onChange={(e) => setRpm(parseInt(e.target.value || "0", 10) || 0)}
-          />
-        </div>
-        <div className="form-row">
-          <label>{t("keyForm.statusLabel")}</label>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
+          <div>
+            <label className={labelClass}>{t("keyForm.nameLabel")}</label>
+            <Input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder={t("keyForm.namePlaceholder")}
+              fullWidth
             />
-            <span className="track"><span className="thumb" /></span>
-            <span>{t("keyForm.enableKey")}</span>
-          </label>
-        </div>
-      </div>
-
-      <div className="row2">
-        <div className="form-row">
-          <label>{t("keyForm.dailyLimitLabel")}</label>
-          <input
-            className="input"
-            type="number"
-            min={0}
-            step="0.01"
-            value={dailyLimit}
-            onChange={(e) => setDailyLimit(parseNum(e.target.value))}
-          />
-        </div>
-        <div className="form-row">
-          <label>{t("keyForm.weeklyLimitLabel")}</label>
-          <input
-            className="input"
-            type="number"
-            min={0}
-            step="0.01"
-            value={weeklyLimit}
-            onChange={(e) => setWeeklyLimit(parseNum(e.target.value))}
-          />
-        </div>
-      </div>
-
-      <div className="form-row">
-        <label className="switch" title={t("keyForm.allowModelsTitle")}>
-          <input
-            type="checkbox"
-            checked={allowModels}
-            onChange={(e) => setAllowModels(e.target.checked)}
-          />
-          <span className="track"><span className="thumb" /></span>
-          <span>{t("keyForm.allowModelsLabel")}</span>
-        </label>
-        <span className="muted" style={{ fontSize: "0.85em", marginLeft: 8 }}>
-          {t("keyForm.allowModelsHint")}
-        </span>
-      </div>
-
-      {globalAliases.length > 0 && (
-        <div className="form-row kf-alias-pick">
-          <label>{t("keyForm.existingAliases")}</label>
-          <div className="kf-alias-chips">
-            {globalAliases.map((a) => {
-              const on = aliasSelected(a);
-              return (
-              <button
-                key={a.alias}
-                type="button"
-                className={"kf-alias-chip" + (on ? " selected" : "")}
-                onClick={() => toggleAlias(a)}
-                title={a.targets.map((t) => `${t.provider}·${t.target_model}${t.group ? `·${t.group}` : ""}`).join("\n")}
-              >
-                {a.alias}{a.targets.length > 1 ? ` (${a.targets.length})` : ""}
-              </button>
-              );
-            })}
+          </div>
+          <div>
+            <label className={labelClass}>{t("keyForm.rpmLabel")}</label>
+            <input
+              className={numberClass}
+              type="number"
+              min={0}
+              value={rpm}
+              onChange={(event) => setRpm(Number.parseInt(event.target.value || "0", 10) || 0)}
+            />
+          </div>
+          <div className="flex items-end">
+            <Switch isSelected={enabled} onChange={setEnabled}>
+              <Switch.Content>
+                <Switch.Control>
+                  <Switch.Thumb />
+                </Switch.Control>
+                {t("keyForm.enableKey")}
+              </Switch.Content>
+            </Switch>
           </div>
         </div>
-      )}
+      </section>
 
-      <div className="form-row">
-        <label>{t("keyForm.modelsLabel")}</label>
+      <section
+        id="policy"
+        className={`${wizard && wizardStep !== 0 ? "hidden" : ""} rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm sm:p-6`}
+      >
+        <div className="mb-5 flex items-center gap-3">
+          <span className="grid size-9 place-items-center rounded-xl bg-cyan-500/10 text-cyan-500">
+            <Gauge size={18} />
+          </span>
+          <div>
+            <h2 className="text-base font-bold">{t("keyForm.mobile.sectionLimits")}</h2>
+            <p className="text-xs text-[var(--muted)]">{t("app.policyHint")}</p>
+          </div>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className={labelClass}>{t("keyForm.dailyLimitLabel")}</label>
+            <input
+              className={numberClass}
+              type="number"
+              min={0}
+              step="0.01"
+              value={dailyLimit}
+              onChange={(event) => setDailyLimit(parseNum(event.target.value))}
+            />
+          </div>
+          <div>
+            <label className={labelClass}>{t("keyForm.weeklyLimitLabel")}</label>
+            <input
+              className={numberClass}
+              type="number"
+              min={0}
+              step="0.01"
+              value={weeklyLimit}
+              onChange={(event) => setWeeklyLimit(parseNum(event.target.value))}
+            />
+          </div>
+        </div>
+        <div className="mt-5 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-3.5">
+          <Switch isSelected={allowModels} onChange={setAllowModels}>
+            <Switch.Content>
+              <Switch.Control>
+                <Switch.Thumb />
+              </Switch.Control>
+              {t("keyForm.allowModelsLabel")}
+            </Switch.Content>
+          </Switch>
+          <p className="mb-0 mt-2 text-[11px] leading-relaxed text-[var(--muted)]">
+            {t("keyForm.allowModelsHint")}
+          </p>
+        </div>
+      </section>
+
+      <section
+        id="models"
+        className={`${wizard && wizardStep !== 1 ? "hidden" : ""} rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm sm:p-6`}
+      >
+        <div className="mb-5 flex items-center gap-3">
+          <span className="grid size-9 place-items-center rounded-xl bg-violet-500/10 text-violet-500">
+            <ShieldCheck size={18} />
+          </span>
+          <div>
+            <h2 className="text-base font-bold">{t("keyForm.mobile.sectionModels")}</h2>
+            <p className="text-xs text-[var(--muted)]">{t("app.modelsHint")}</p>
+          </div>
+        </div>
+        {globalAliases.length > 0 && (
+          <div className="mb-4">
+            <label className={labelClass}>{t("keyForm.existingAliases")}</label>
+            <div className="flex flex-wrap gap-2">
+              {globalAliases.map((alias) => (
+                <button
+                  key={alias.alias}
+                  type="button"
+                  onClick={() => toggleAlias(alias)}
+                  className={`rounded-xl border px-3 py-1.5 text-xs transition ${aliasSelected(alias) ? "border-indigo-500/25 bg-[var(--accent-soft)] text-[var(--accent-soft-foreground)]" : "border-[var(--border)] bg-[var(--surface-secondary)] text-[var(--muted)] hover:text-[var(--foreground)]"}`}
+                >
+                  {alias.alias}
+                  {alias.targets.length > 1 ? ` (${alias.targets.length})` : ""}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        <label className={labelClass}>{t("keyForm.modelsLabel")}</label>
         {pickPath ? (
-          <div className="model-chips-box">
-            {models.length === 0 && <span className="mc-empty">{t("keyForm.modelsEmpty")}</span>}
-            {models.map((m) => (
-              <span key={priceKey(m)} className="mc-chip">
-                {m.alias}{m.group ? " · " + m.group : ""}
-                <button type="button" className="mc-x" onClick={() => {
-                  setModels((prev) => prev.filter((x) => priceKey(x) !== priceKey(m)));
-                }} aria-label={t("keyForm.removeModel")}>×</button>
+          <div className="flex min-h-14 flex-wrap items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-2.5">
+            {models.length === 0 && (
+              <span className="text-xs text-[var(--muted)]">{t("keyForm.modelsEmpty")}</span>
+            )}
+            {models.map((model) => (
+              <span
+                key={`${model.provider}-${model.target_model}-${model.group ?? ""}`}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-[10px]"
+              >
+                {model.alias}
+                {model.group ? ` · ${formatTierLabel(t, model.group)}` : ""}
+                <button
+                  type="button"
+                  className="text-[var(--muted)] hover:text-[var(--danger)]"
+                  onClick={() =>
+                    handleModelsChange(models.filter((candidate) => candidate !== model))
+                  }
+                  aria-label={t("keyForm.removeModel")}
+                >
+                  <Trash2 size={13} />
+                </button>
               </span>
             ))}
-            <button type="button" className="mc-add" onClick={() => nav(pickPath, { state: { models } })}>
-              + {t("keyForm.addModel")}
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 rounded-lg border border-dashed border-indigo-500/40 px-2.5 py-1.5 text-[10px] text-[var(--accent-soft-foreground)]"
+              onClick={openPicker}
+            >
+              <Plus size={13} />
+              {t("keyForm.addModel")}
             </button>
           </div>
         ) : (
           <ModelPicker initial={initial?.models} onChange={handleModelsChange} />
         )}
-      </div>
 
-      {/* Per-alias pricing table. Stamped onto each ModelRule at submit.
-          Each row toggles between token pricing (default) and per-call fixed
-          pricing. Under per_call the three token-price inputs are hidden
-          (values retained but dormant) and a single $/call input is shown. */}
-      {models.length > 0 && (
-        <div className="form-row" style={{ marginTop: 8 }}>
-          <label>{t("keyForm.priceLabel")}</label>
-          <div className="card table-wrap" style={{ padding: 0 }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("keyForm.colAlias")}</th>
-                  <th>{t("keyForm.colProvider")}</th>
-                  <th>{t("keyForm.colGroup")}</th>
-                  <th title={t("keyForm.colBillingModeHint")}>{t("keyForm.colBillingMode")}</th>
-                  <th>{t("keyForm.colInput")}</th>
-                  <th>{t("keyForm.colOutput")}</th>
-                  <th title={t("keyForm.colCacheReadHint")}>{t("keyForm.colCacheRead")}</th>
-                  <th title={t("keyForm.colRecommendHint")}>{t("keyForm.colRecommend")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {/* Per-alias unified pricing: dedupe by priceKey so a
-                    multi-target global alias renders ONE unified price row
-                    (aggregated provider/group show the targets it covers). */}
-                {models.filter((m, i, arr) => arr.findIndex((x) => priceKey(x) === priceKey(m)) === i).map((m) => renderPriceEditor(m, "table"))}
-              </tbody>
-            </table>
+        {uniqueModels.length > 0 && (
+          <div className="mt-5 grid gap-3">
+            <label className={labelClass}>{t("keyForm.priceLabel")}</label>
+            {uniqueModels.map((model) => {
+              const key = priceKey(model);
+              const row = prices[key] ?? emptyPrice;
+              const perCall = row.billing_mode === "per_call";
+              const matching = models.filter((candidate) => priceKey(candidate) === key);
+              const hint = matching.length === 1 && lookupPrice(priceTable, model.target_model);
+              return (
+                <article
+                  key={key}
+                  className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-3.5"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <strong className="text-sm">
+                        {model.alias}
+                        {matching.length > 1 ? ` (${matching.length})` : ""}
+                      </strong>
+                      <p className="mt-1 text-[10px] text-[var(--muted)]">
+                        {[...new Set(matching.map((item) => item.provider))].join(", ")}
+                        {model.group ? ` · ${formatTierLabel(t, model.group)}` : ""}
+                      </p>
+                    </div>
+                    <div className="flex rounded-lg bg-[var(--surface-tertiary)] p-1">
+                      <button
+                        type="button"
+                        onClick={() => setPrice(model, "billing_mode", "tokens")}
+                        className={`rounded-md px-2.5 py-1 text-[10px] ${!perCall ? "bg-[var(--surface)] font-semibold shadow-sm" : "text-[var(--muted)]"}`}
+                      >
+                        {t("keyForm.billingTokens")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPrice(model, "billing_mode", "per_call")}
+                        className={`rounded-md px-2.5 py-1 text-[10px] ${perCall ? "bg-[var(--surface)] font-semibold shadow-sm" : "text-[var(--muted)]"}`}
+                      >
+                        {t("keyForm.billingPerCall")}
+                      </button>
+                    </div>
+                  </div>
+                  {perCall ? (
+                    <div className="mt-3 max-w-xs">
+                      <label className={labelClass}>{t("keyForm.colPerCall")}</label>
+                      <input
+                        className={numberClass}
+                        type="number"
+                        min={0}
+                        step="0.0001"
+                        value={row.per_call_usd}
+                        onChange={(event) => setPrice(model, "per_call_usd", event.target.value)}
+                      />
+                    </div>
+                  ) : (
+                    <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                      <div>
+                        <label className={labelClass}>{t("keyForm.colInput")}</label>
+                        <input
+                          className={numberClass}
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={row.input_price_per_million}
+                          onChange={(event) =>
+                            setPrice(model, "input_price_per_million", event.target.value)
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className={labelClass}>{t("keyForm.colOutput")}</label>
+                        <input
+                          className={numberClass}
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={row.output_price_per_million}
+                          onChange={(event) =>
+                            setPrice(model, "output_price_per_million", event.target.value)
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className={labelClass}>{t("keyForm.colCacheRead")}</label>
+                        <input
+                          className={numberClass}
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={row.cache_read_price_per_million}
+                          onChange={(event) =>
+                            setPrice(model, "cache_read_price_per_million", event.target.value)
+                          }
+                        />
+                      </div>
+                    </div>
+                  )}
+                  <div className="mt-3 flex items-start justify-between gap-3">
+                    {perCall ? (
+                      <p className="m-0 max-w-3xl text-[10px] leading-relaxed text-amber-600">
+                        ⚠ {row.per_call_usd === 0 ? `${t("keyForm.perCallZeroWarn")} ` : ""}
+                        {t("keyForm.perCallImageWarn")}
+                      </p>
+                    ) : (
+                      <span />
+                    )}
+                    {hint && !perCall && (
+                      <Button size="sm" variant="ghost" onPress={() => recommend(model)}>
+                        <Sparkles size={14} />
+                        {t("keyForm.recommend")}
+                      </Button>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
           </div>
+        )}
+      </section>
+
+      {wizard && wizardStep === wizardMaxStep && (
+        <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm sm:p-6">
+          <div className="mb-5 flex items-center gap-3">
+            <span className="grid size-9 place-items-center rounded-xl bg-emerald-500/10 text-emerald-500">
+              <ShieldCheck size={18} />
+            </span>
+            <div>
+              <h2 className="text-base font-bold">{t("app.review")}</h2>
+              <p className="text-xs text-[var(--muted)]">{t("app.reviewHint")}</p>
+            </div>
+          </div>
+          <dl className="grid gap-3 text-xs sm:grid-cols-2">
+            <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
+              <dt className="text-[var(--muted)]">{t("keyForm.idLabel")}</dt>
+              <dd className="mt-1 font-mono font-semibold">{id || "—"}</dd>
+            </div>
+            <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
+              <dt className="text-[var(--muted)]">{t("keyForm.nameLabel")}</dt>
+              <dd className="mt-1 font-semibold">{name.trim() || id || "—"}</dd>
+            </div>
+            <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
+              <dt className="text-[var(--muted)]">{t("keyForm.statusLabel")}</dt>
+              <dd className="mt-1 font-semibold">
+                {enabled ? t("keys.enabled") : t("keys.disabled")}
+              </dd>
+            </div>
+            <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
+              <dt className="text-[var(--muted)]">{t("keys.colRpm")}</dt>
+              <dd className="mt-1 font-semibold tabular-nums">
+                {rpm === 0 ? t("keys.mobile.noLimit") : rpm}
+              </dd>
+            </div>
+            <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
+              <dt className="text-[var(--muted)]">{t("keyForm.dailyLimitLabel")}</dt>
+              <dd className="mt-1 font-semibold tabular-nums">${dailyLimit.toFixed(2)}</dd>
+            </div>
+            <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
+              <dt className="text-[var(--muted)]">{t("keyForm.weeklyLimitLabel")}</dt>
+              <dd className="mt-1 font-semibold tabular-nums">${weeklyLimit.toFixed(2)}</dd>
+            </div>
+            <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
+              <dt className="text-[var(--muted)]">{t("keyForm.allowModelsLabel")}</dt>
+              <dd className="mt-1">
+                <Chip
+                  size="sm"
+                  variant="soft"
+                  color={allowModels ? "success" : "danger"}
+                >
+                  {allowModels ? t("keys.enabled") : t("keys.disabled")}
+                </Chip>
+              </dd>
+            </div>
+            <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
+              <dt className="text-[var(--muted)]">{t("keyForm.modelsLabel")}</dt>
+              <dd className="mt-1 flex flex-wrap items-center gap-1.5">
+                {reviewModelNames.length === 0 ? (
+                  <span className="text-[var(--muted)]">{t("keyForm.modelsEmpty")}</span>
+                ) : (
+                  <>
+                    {visibleReviewModels.map((modelName) => (
+                      <Chip key={modelName} size="sm" variant="soft" color="accent">
+                        {modelName}
+                      </Chip>
+                    ))}
+                    {hiddenReviewModelCount > 0 && (
+                      <Tooltip delay={100} closeDelay={100}>
+                        <Tooltip.Trigger
+                          className="inline-flex outline-none"
+                          aria-label={t("keyForm.reviewAllModels")}
+                        >
+                          <Chip size="sm" variant="soft" color="default">
+                            +{hiddenReviewModelCount}
+                          </Chip>
+                        </Tooltip.Trigger>
+                        <Tooltip.Content placement="top" showArrow className="w-64">
+                          <div>
+                            <strong className="mb-2 block text-xs font-semibold">
+                              {t("keyForm.reviewAllModels")}
+                            </strong>
+                            <div className="flex max-h-48 flex-wrap gap-1.5 overflow-y-auto">
+                              {reviewModelNames.map((modelName) => (
+                                <Chip
+                                  key={modelName}
+                                  size="sm"
+                                  variant="soft"
+                                  color="accent"
+                                >
+                                  {modelName}
+                                </Chip>
+                              ))}
+                            </div>
+                          </div>
+                        </Tooltip.Content>
+                      </Tooltip>
+                    )}
+                  </>
+                )}
+              </dd>
+            </div>
+          </dl>
+        </section>
+      )}
+
+      {(localError || error) && (
+        <div
+          className="rounded-xl border border-red-500/20 bg-[var(--danger-soft)] px-3 py-2.5 text-xs text-[var(--danger)]"
+          role="alert"
+        >
+          {localError || error}
         </div>
       )}
-      </div>
-
-      {(localErr || error) && <div className="error">{localErr || error}</div>}
-
-      <div className="actions fp-foot">
-        <button className="btn primary" type="submit" disabled={busy}>
-          {busy ? t("keyForm.submitting") : submitLabel}
-        </button>
-        <button className="btn" type="button" onClick={onCancel}>{t("keyForm.cancel")}</button>
+      <div className="sticky bottom-20 z-10 flex flex-wrap items-center gap-2 rounded-2xl border border-[var(--border)] bg-[color-mix(in_srgb,var(--surface)_82%,transparent)] p-3 shadow-lg backdrop-blur-xl lg:bottom-4">
+        {wizard && wizardStep > 0 && (
+          <Button
+            type="button"
+            variant="ghost"
+            onPress={() => setWizardStep((step) => Math.max(0, step - 1))}
+          >
+            {t("app.previous")}
+          </Button>
+        )}
+        {!wizard || wizardStep === wizardMaxStep ? (
+          <Button
+            key="submit"
+            type="button"
+            variant="primary"
+            isDisabled={busy}
+            onPress={() => void submit()}
+          >
+            {busy ? t("keyForm.submitting") : submitLabel}
+          </Button>
+        ) : (
+          <Button
+            key="next"
+            type="button"
+            variant="primary"
+            onPress={() => {
+              if (wizardStep === 0 && !validateId()) return;
+              setLocalError("");
+              setWizardStep((step) => Math.min(wizardMaxStep, step + 1));
+            }}
+          >
+            {t("app.next")}
+          </Button>
+        )}
+        <Button
+          type="button"
+          variant="ghost"
+          onPress={() => {
+            clearDraft();
+            onCancel();
+          }}
+        >
+          {t("keyForm.cancel")}
+        </Button>
         {dangerLabel && onDanger && (
-          <span className="fp-foot-right">
-            <button type="button" className="btn danger-outline" onClick={onDanger}>{dangerLabel}</button>
-          </span>
+          <Button className="ml-auto" type="button" variant="danger-soft" onPress={onDanger}>
+            <Trash2 size={16} />
+            {dangerLabel}
+          </Button>
         )}
       </div>
     </form>

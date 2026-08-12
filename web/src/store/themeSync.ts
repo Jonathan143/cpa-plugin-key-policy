@@ -22,8 +22,10 @@
 
 const THEME_ATTR = "data-theme";
 const PANEL_THEME_STORAGE_KEY = "cli-proxy-theme";
+const STANDALONE_THEME_STORAGE_KEY = "cpa-key-policy-theme";
 
 export type AppliedTheme = "light" | "white" | "dark";
+export type ThemePreference = "system" | "light" | "dark";
 
 let observer: MutationObserver | null = null;
 let storageHandler: ((e: StorageEvent) => void) | null = null;
@@ -68,8 +70,21 @@ function applyThemeToSelf(theme: AppliedTheme): void {
 }
 
 // Compute current theme (from parent or light fallback) and apply it.
+function standaloneTheme(): AppliedTheme {
+  let preference: ThemePreference = "system";
+  try {
+    const saved = localStorage.getItem(STANDALONE_THEME_STORAGE_KEY);
+    if (saved === "light" || saved === "dark" || saved === "system") preference = saved;
+  } catch {
+    // Storage can be unavailable; system remains the safe fallback.
+  }
+  if (preference === "dark") return "dark";
+  if (preference === "light") return "white";
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "white";
+}
+
 function sync(): void {
-  applyThemeToSelf(readParentTheme() ?? "light");
+  applyThemeToSelf(readParentTheme() ?? standaloneTheme());
 }
 
 // Start mirroring the parent panel's theme and keep it in sync.
@@ -81,7 +96,10 @@ export function initThemeSync(): void {
   // Apply immediately so the first paint matches the panel.
   sync();
 
-  if (!isEmbedded()) return; // standalone: nothing to watch.
+  if (!isEmbedded()) {
+    window.matchMedia?.("(prefers-color-scheme: dark)").addEventListener("change", sync);
+    return;
+  }
 
   // Watch the parent's <html> data-theme attribute. This catches:
   //  - user clicking a theme in the panel (setTheme → applyTheme writes DOM)
@@ -101,6 +119,30 @@ export function initThemeSync(): void {
     if (e.key === PANEL_THEME_STORAGE_KEY) sync();
   };
   window.addEventListener("storage", storageHandler);
+}
+
+export function getThemePreference(): ThemePreference {
+  try {
+    const saved = localStorage.getItem(STANDALONE_THEME_STORAGE_KEY);
+    if (saved === "light" || saved === "dark" || saved === "system") return saved;
+  } catch {
+    // Ignore storage access failures.
+  }
+  return "system";
+}
+
+export function setThemePreference(preference: ThemePreference): void {
+  try {
+    localStorage.setItem(STANDALONE_THEME_STORAGE_KEY, preference);
+  } catch {
+    // Theme still applies for the current page even without persistence.
+  }
+  if (!isEmbedded()) sync();
+  window.dispatchEvent(new CustomEvent("cpa-key-policy-theme"));
+}
+
+export function isThemeControlledByHost(): boolean {
+  return readParentTheme() !== null;
 }
 
 // For tests: tear down listeners and reset state so a new init can run.

@@ -26,13 +26,17 @@ export default function KeyNew() {
       models: pickerState.pickedModels ?? draft.models ?? [],
       daily_limit_usd: draft.daily_limit_usd ?? 0,
       weekly_limit_usd: draft.weekly_limit_usd ?? 0,
+      total_limit_usd: draft.total_limit_usd ?? 0,
+      expires_at: draft.expires_at || undefined,
       allow_models_endpoint: draft.allow_models_endpoint ?? false,
       key_preview: "",
       usage: {
         daily_usd: 0,
         weekly_usd: 0,
+        total_usd: 0,
         daily_limit_usd: draft.daily_limit_usd ?? 0,
         weekly_limit_usd: draft.weekly_limit_usd ?? 0,
+        total_limit_usd: draft.total_limit_usd ?? 0,
       },
     };
   }, [pickerState]);
@@ -73,6 +77,8 @@ export default function KeyNew() {
             models: value.models,
             daily_limit_usd: value.daily_limit_usd,
             weekly_limit_usd: value.weekly_limit_usd,
+            total_limit_usd: value.total_limit_usd,
+            expires_at: value.expires_at,
             allow_models_endpoint: value.allow_models_endpoint,
           });
           setPlain(result.plain_key);

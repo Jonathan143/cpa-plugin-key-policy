@@ -1,7 +1,5 @@
 import { Button, Toast, Tooltip } from "@heroui/react";
 import {
-  ChevronsLeft,
-  ChevronsRight,
   CirclePlus,
   KeyRound,
   LayoutDashboard,
@@ -38,7 +36,7 @@ function useAuthTick() {
   return isAuthed();
 }
 
-function Brand({ compact = false }: { compact?: boolean }) {
+function Brand() {
   const t = useT();
   const session = getSession();
   return (
@@ -53,17 +51,15 @@ function Brand({ compact = false }: { compact?: boolean }) {
           className="absolute bottom-1 right-1 rounded-full bg-indigo-700 p-0.5 text-cyan-100"
         />
       </span>
-      {!compact && (
-        <span className="grid min-w-0 gap-0.5">
-          <strong className="max-w-44 truncate text-[13px] font-bold">{t("header.title")}</strong>
-          <small
-            className="max-w-44 truncate text-[10px] text-[var(--muted)]"
-            title={session?.baseUrl}
-          >
-            {session?.baseUrl}
-          </small>
-        </span>
-      )}
+      <span className="hidden min-w-0 gap-0.5 sm:grid">
+        <strong className="max-w-44 truncate text-[13px] font-bold">{t("header.title")}</strong>
+        <small
+          className="max-w-44 truncate text-[10px] text-[var(--muted)]"
+          title={session?.baseUrl}
+        >
+          {session?.baseUrl}
+        </small>
+      </span>
     </div>
   );
 }
@@ -113,8 +109,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   const navigate = useNavigate();
   const preferences = useUiPreferences();
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const collapsed = preferences.sidebarCollapsed;
   const keysActive = location.pathname.startsWith("/keys");
   const mappingActive = location.pathname.startsWith("/mapping");
   const navItems = [
@@ -122,58 +116,32 @@ function AppShell({ children }: { children: React.ReactNode }) {
     { to: "/mapping", label: t("header.mapping"), icon: Network, active: mappingActive },
   ];
   const navClass =
-    "relative flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-[var(--muted)] transition hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]";
+    "relative flex h-10 items-center gap-2 whitespace-nowrap rounded-xl px-3 text-sm text-[var(--muted)] transition hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]";
 
   return (
-    <div
-      className={`min-h-screen lg:grid ${collapsed ? "lg:grid-cols-[76px_minmax(0,1fr)]" : "lg:grid-cols-[250px_minmax(0,1fr)]"}`}
-    >
-      <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-[250px] flex-col border-r border-[var(--border)] bg-[color-mix(in_srgb,var(--surface)_90%,transparent)] p-3.5 backdrop-blur-xl transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-auto lg:translate-x-0 ${mobileNavOpen ? "translate-x-0" : "-translate-x-full"}`}
-        aria-label={t("app.primaryNav")}
-      >
-        <div className="flex min-h-14 items-center border-b border-[var(--separator)] px-1.5 pb-4">
-          <Brand compact={collapsed} />
-        </div>
-        <nav className="grid gap-1.5 py-4">
-          {navItems.map(({ to, label, icon: Icon, active }) => (
-            <Link
-              key={to}
-              to={to}
-              onClick={() => setMobileNavOpen(false)}
-              className={`${navClass} ${collapsed ? "lg:justify-center lg:px-0" : ""} ${active ? "bg-[var(--accent-soft)] font-semibold text-[var(--accent-soft-foreground)] before:absolute before:left-0 before:h-5 before:w-0.5 before:rounded-full before:bg-[var(--accent)]" : ""}`}
-            >
-              <Icon size={19} />
-              {!collapsed && <span>{label}</span>}
-            </Link>
-          ))}
-        </nav>
-        <div className="mt-auto border-t border-[var(--separator)] pt-3">
-          <button
-            type="button"
-            className={`${navClass} ${collapsed ? "lg:justify-center lg:px-0" : ""}`}
-            onClick={() => preferences.setSidebarCollapsed(!collapsed)}
-          >
-            {collapsed ? <ChevronsRight size={19} /> : <ChevronsLeft size={19} />}
-            {!collapsed && <span>{t("app.collapse")}</span>}
-          </button>
-        </div>
-      </aside>
-      {mobileNavOpen && (
-        <button
-          className="fixed inset-0 z-30 bg-slate-950/55 lg:hidden"
-          aria-label={t("app.closeNav")}
-          onClick={() => setMobileNavOpen(false)}
-        />
-      )}
-
-      <div className="min-w-0">
-        <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--surface)_80%,transparent)] px-4 backdrop-blur-xl sm:px-7">
-          <div className="lg:hidden">
+    <div className="min-h-screen">
+      <header className="sticky top-0 z-20 border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--surface)_80%,transparent)] backdrop-blur-xl">
+        <div className="mx-auto flex h-16 w-full max-w-[1600px] items-center gap-4 px-4 sm:px-7 lg:px-10">
+          <div className="shrink-0">
             <Brand />
           </div>
-          <div className="hidden lg:block" />
-          <div className="flex items-center gap-1">
+          <nav
+            className="hidden min-w-0 flex-1 items-center justify-center gap-1 lg:flex"
+            aria-label={t("app.primaryNav")}
+          >
+            {navItems.map(({ to, label, icon: Icon, active }) => (
+              <Link
+                key={to}
+                to={to}
+                aria-current={active ? "page" : undefined}
+                className={`${navClass} ${active ? "bg-[var(--accent-soft)] font-semibold text-[var(--accent-soft-foreground)] after:absolute after:inset-x-3 after:-bottom-[13px] after:h-0.5 after:rounded-full after:bg-[var(--accent)]" : ""}`}
+              >
+                <Icon size={18} />
+                <span>{label}</span>
+              </Link>
+            ))}
+          </nav>
+          <div className="ml-auto flex shrink-0 items-center gap-1">
             <Tooltip>
               <Tooltip.Trigger>
                 <Button
@@ -206,13 +174,13 @@ function AppShell({ children }: { children: React.ReactNode }) {
               <span className="hidden sm:inline">{t("header.logout")}</span>
             </Button>
           </div>
-        </header>
-        <main
-          className={`mx-auto w-full max-w-[1600px] px-4 pb-24 pt-6 sm:px-7 sm:pt-8 lg:pb-10 ${preferences.density === "compact" ? "lg:py-6" : "lg:p-10"}`}
-        >
-          {children}
-        </main>
-      </div>
+        </div>
+      </header>
+      <main
+        className={`mx-auto w-full max-w-[1600px] px-4 pb-24 pt-6 sm:px-7 sm:pt-8 lg:pb-10 ${preferences.density === "compact" ? "lg:py-6" : "lg:p-10"}`}
+      >
+        {children}
+      </main>
 
       <nav
         className="fixed inset-x-3 bottom-[max(.75rem,env(safe-area-inset-bottom))] z-30 grid h-16 grid-cols-3 items-center rounded-2xl border border-[var(--border)] bg-[color-mix(in_srgb,var(--surface)_82%,transparent)] p-1 shadow-2xl backdrop-blur-xl lg:hidden"
@@ -220,6 +188,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       >
         <Link
           to="/keys"
+          aria-current={keysActive ? "page" : undefined}
           className={`grid place-content-center justify-items-center gap-0.5 text-[9px] ${keysActive ? "text-[var(--accent-soft-foreground)]" : "text-[var(--muted)]"}`}
         >
           <LayoutDashboard size={20} />
@@ -236,6 +205,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
         </Link>
         <Link
           to="/mapping"
+          aria-current={mappingActive ? "page" : undefined}
           className={`grid place-content-center justify-items-center gap-0.5 text-[9px] ${mappingActive ? "text-[var(--accent-soft-foreground)]" : "text-[var(--muted)]"}`}
         >
           <Network size={20} />

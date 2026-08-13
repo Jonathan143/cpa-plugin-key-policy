@@ -17,6 +17,8 @@ export interface KeyFormValues {
   models: ModelRule[];
   daily_limit_usd: number;
   weekly_limit_usd: number;
+  total_limit_usd: number;
+  expires_at: string;
   allow_models_endpoint?: boolean;
 }
 
@@ -52,6 +54,14 @@ function priceKey(model: { alias: string; group?: string }): string {
 function parseNum(value: string): number {
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function toLocalDateTime(value?: string): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 const emptyPrice: PriceRow = {
@@ -108,6 +118,8 @@ export default function KeyForm({
   const [rpm, setRpm] = useState(initial?.rpm ?? 0);
   const [dailyLimit, setDailyLimit] = useState(initial?.daily_limit_usd ?? 0);
   const [weeklyLimit, setWeeklyLimit] = useState(initial?.weekly_limit_usd ?? 0);
+  const [totalLimit, setTotalLimit] = useState(initial?.total_limit_usd ?? 0);
+  const [expiresAt, setExpiresAt] = useState(toLocalDateTime(initial?.expires_at));
   const [allowModels, setAllowModels] = useState(initial?.allow_models_endpoint ?? false);
   const [models, setModels] = useState<ModelRule[]>(initial?.models ?? []);
   const [prices, setPrices] = useState<Record<string, PriceRow>>(() =>
@@ -164,6 +176,8 @@ export default function KeyForm({
         if (draft.rpm !== undefined) setRpm(draft.rpm);
         if (draft.daily_limit_usd !== undefined) setDailyLimit(draft.daily_limit_usd);
         if (draft.weekly_limit_usd !== undefined) setWeeklyLimit(draft.weekly_limit_usd);
+        if (draft.total_limit_usd !== undefined) setTotalLimit(draft.total_limit_usd);
+        if (draft.expires_at !== undefined) setExpiresAt(draft.expires_at);
         if (draft.allow_models_endpoint !== undefined) setAllowModels(draft.allow_models_endpoint);
         if (draft.models && !preferInitialModels) setModels(draft.models);
         if (draft.prices && !preferInitialModels) setPrices(draft.prices);
@@ -190,6 +204,8 @@ export default function KeyForm({
           models,
           daily_limit_usd: dailyLimit,
           weekly_limit_usd: weeklyLimit,
+          total_limit_usd: totalLimit,
+          expires_at: expiresAt,
           allow_models_endpoint: allowModels,
           prices,
           wizardStep,
@@ -205,11 +221,13 @@ export default function KeyForm({
     draftKey,
     draftReady,
     enabled,
+    expiresAt,
     id,
     models,
     name,
     prices,
     rpm,
+    totalLimit,
     weeklyLimit,
     wizardStep,
   ]);
@@ -340,6 +358,8 @@ export default function KeyForm({
           rpm,
           daily_limit_usd: dailyLimit,
           weekly_limit_usd: weeklyLimit,
+          total_limit_usd: totalLimit,
+          expires_at: expiresAt,
           allow_models_endpoint: allowModels,
           prices,
         },
@@ -363,6 +383,11 @@ export default function KeyForm({
   const submit = async () => {
     setLocalError("");
     if (!validateId()) return;
+    const expiration = expiresAt ? new Date(expiresAt) : null;
+    if (expiration && Number.isNaN(expiration.getTime())) {
+      setLocalError(t("keyForm.expiryInvalid"));
+      return;
+    }
     setBusy(true);
     try {
       await onSubmit({
@@ -372,6 +397,8 @@ export default function KeyForm({
         rpm,
         daily_limit_usd: dailyLimit,
         weekly_limit_usd: weeklyLimit,
+        total_limit_usd: totalLimit,
+        expires_at: expiration ? expiration.toISOString() : "",
         allow_models_endpoint: allowModels,
         models: models.map((model) => ({ ...model, ...(prices[priceKey(model)] ?? emptyPrice) })),
       });
@@ -505,6 +532,18 @@ export default function KeyForm({
               onChange={(event) => setRpm(Number.parseInt(event.target.value || "0", 10) || 0)}
             />
           </div>
+          <div>
+            <label className={labelClass}>{t("keyForm.expiresAtLabel")}</label>
+            <input
+              className={numberClass}
+              type="datetime-local"
+              value={expiresAt}
+              onChange={(event) => setExpiresAt(event.target.value)}
+            />
+            <p className="mb-0 mt-1.5 text-[10px] text-[var(--muted)]">
+              {t("keyForm.expiresAtHint")}
+            </p>
+          </div>
           <div className="flex items-end">
             <Switch isSelected={enabled} onChange={setEnabled}>
               <Switch.Content>
@@ -531,7 +570,7 @@ export default function KeyForm({
             <p className="text-xs text-[var(--muted)]">{t("app.policyHint")}</p>
           </div>
         </div>
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <div>
             <label className={labelClass}>{t("keyForm.dailyLimitLabel")}</label>
             <input
@@ -553,6 +592,20 @@ export default function KeyForm({
               value={weeklyLimit}
               onChange={(event) => setWeeklyLimit(parseNum(event.target.value))}
             />
+          </div>
+          <div>
+            <label className={labelClass}>{t("keyForm.totalLimitLabel")}</label>
+            <input
+              className={numberClass}
+              type="number"
+              min={0}
+              step="0.01"
+              value={totalLimit}
+              onChange={(event) => setTotalLimit(parseNum(event.target.value))}
+            />
+            <p className="mb-0 mt-1.5 text-[10px] text-[var(--muted)]">
+              {t("keyForm.totalLimitHint")}
+            </p>
           </div>
         </div>
         <div className="mt-5 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-3.5">
@@ -798,6 +851,16 @@ export default function KeyForm({
             <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
               <dt className="text-[var(--muted)]">{t("keyForm.weeklyLimitLabel")}</dt>
               <dd className="mt-1 font-semibold tabular-nums">${weeklyLimit.toFixed(2)}</dd>
+            </div>
+            <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
+              <dt className="text-[var(--muted)]">{t("keyForm.totalLimitLabel")}</dt>
+              <dd className="mt-1 font-semibold tabular-nums">${totalLimit.toFixed(2)}</dd>
+            </div>
+            <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
+              <dt className="text-[var(--muted)]">{t("keyForm.expiresAtLabel")}</dt>
+              <dd className="mt-1 font-semibold">
+                {expiresAt ? new Date(expiresAt).toLocaleString() : t("keyForm.permanent")}
+              </dd>
             </div>
             <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
               <dt className="text-[var(--muted)]">{t("keyForm.allowModelsLabel")}</dt>

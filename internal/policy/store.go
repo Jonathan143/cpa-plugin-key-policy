@@ -270,6 +270,10 @@ func (s *Store) Authenticate(method, path string, headers http.Header, query map
 		decision.Reason = "key_disabled"
 		return decision
 	}
+	if keyExpired(key, time.Now()) {
+		decision.Reason = "key_expired"
+		return decision
+	}
 	if decision.ModelList {
 		// Per-key override: a key with AllowModelsEndpoint=true may reach the
 		// global /v1/models list; otherwise it's 401. We still cannot filter the
@@ -302,7 +306,7 @@ func (s *Store) Authenticate(method, path string, headers http.Header, query map
 		decision.Reason = "rpm_exceeded"
 		return decision
 	}
-	// Dollar usage limit check (daily / weekly). Only enforced when a limit is
+	// Dollar usage limit check (daily / weekly / lifetime total). Only enforced when a limit is
 	// set (>0). This is a pre-request gate; the request that pushes usage over
 	// the limit is allowed through, and the next request is rejected — matching
 	// the RPM limiter's "off-by-one" semantics.
@@ -353,7 +357,7 @@ func (s *Store) Route(headers http.Header, query map[string][]string, requested 
 		return ModelRule{}, "", false
 	}
 	key := s.findBySecret(ExtractAPIKey(headers, query))
-	if key == nil || !key.Enabled {
+	if key == nil || !key.Enabled || keyExpired(key, time.Now()) {
 		return ModelRule{}, "", false
 	}
 	// Prefer the selection Authenticate already made for this request so the
@@ -367,6 +371,10 @@ func (s *Store) Route(headers http.Header, query map[string][]string, requested 
 		return ModelRule{}, key.ID, false
 	}
 	return rule, key.ID, true
+}
+
+func keyExpired(key *KeyConfig, now time.Time) bool {
+	return key != nil && key.ExpiresAt != nil && !now.Before(*key.ExpiresAt)
 }
 
 // resolveRuleForAlias selects the ModelRule for the requested alias, applying
@@ -647,22 +655,47 @@ func (s *Store) RecordUsage(apiKeyOrID, alias, model string, failed bool, detail
 	return cost
 }
 
-// UsageSummaryFor returns the current daily/weekly usage + limits for a key
+// UsageSummaryFor returns the current daily/weekly/lifetime usage + limits for a key
 // (for the keys-list management API).
 func (s *Store) UsageSummaryFor(key KeyConfig) UsageSummary {
 	_, usage := s.runtimeComponents()
 	if usage == nil {
-		return UsageSummary{DailyLimitUSD: key.DailyLimitUSD, WeeklyLimitUSD: key.WeeklyLimitUSD}
+		return UsageSummary{
+			DailyLimitUSD:  key.DailyLimitUSD,
+			WeeklyLimitUSD: key.WeeklyLimitUSD,
+			TotalLimitUSD:  key.TotalLimitUSD,
+		}
 	}
 	return usage.Summary(key)
 }
 
-// ResetUsage clears in-memory usage for a key (manual quota unlock).
-func (s *Store) ResetUsage(id string) {
-	_, usage := s.runtimeComponents()
-	if usage != nil {
-		usage.resetUsage(id)
+// ResetUsage clears all daily, weekly, lifetime, and per-alias usage for one
+// key and persists the reset immediately.
+func (s *Store) ResetUsage(id string) error {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("id is required")
 	}
+	s.mu.Lock()
+	if s.keys[id] == nil {
+		s.mu.Unlock()
+		return ErrUnknownKey
+	}
+	usageLedger := s.usage
+	s.mu.Unlock()
+	if usageLedger != nil {
+		usageLedger.resetUsage(id)
+	}
+	s.mu.Lock()
+	keys := s.keysSnapshotLocked()
+	usage := s.usageSnapshotLocked()
+	aliases := s.aliasesSnapshotLocked()
+	rules := s.classifyRulesSnapshotLocked()
+	path := s.statePath
+	s.mu.Unlock()
+	return s.saveState(path, keys, usage, aliases, rules)
 }
 
 // AliasUsageFor returns a per-alias usage breakdown for the key with the given

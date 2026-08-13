@@ -32,7 +32,8 @@ A plugin-owned secret (`cpa_…`). Authenticated only by this plugin. Holds:
 
 - allowed **models** and/or **aliases**
 - RPM
-- optional daily / weekly dollar limits
+- optional daily / weekly / lifetime dollar limits (lifetime only resets manually)
+- optional expiration time (omitted = permanent)
 - optional `allow_models_endpoint` (see below)
 
 ### Alias (global mapping table)
@@ -171,6 +172,7 @@ Exact paths (no path templates). Auth: CPA management bearer token.
 - `GET/POST/PATCH/DELETE …/keys` (`id` in query or body for mutate)
 - `POST …/keys/rotate?id=…`
 - `POST …/keys/reset-rpm?id=…`
+- `POST …/keys/reset-usage?id=…` — clear daily, weekly, lifetime, and per-alias usage
 - `GET …/keys/usage?id=…`
 - `GET …/status`
 
@@ -195,6 +197,10 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/keys" \
     "id": "team-a",
     "name": "Team A",
     "rpm": 60,
+    "daily_limit_usd": 5,
+    "weekly_limit_usd": 20,
+    "total_limit_usd": 100,
+    "expires_at": "2027-01-01T00:00:00Z",
     "models": [
       {"alias":"fast","provider":"codex","target_model":"gpt-5.4-mini","group":"free"}
     ]

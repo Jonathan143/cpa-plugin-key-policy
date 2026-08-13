@@ -13,7 +13,8 @@ const (
 )
 
 // usageLedger tracks per-key dollar usage with a daily window (UTC midnight
-// reset) and a rolling 7-day weekly window. Usage is also broken down per alias.
+// reset), a rolling 7-day weekly window, and a lifetime total that only resets
+// through an explicit management action. Usage is also broken down per alias.
 //
 // It is the in-memory source of truth; a background flusher periodically
 // persists it to the state JSON (see Store.persistUsage). Reads for limit
@@ -92,6 +93,12 @@ func (l *usageLedger) ensureWeeklyWindowLocked(st *UsageState, now time.Time) {
 	}
 }
 
+func (l *usageLedger) ensureTotalWindowLocked(w *UsageWindow, now time.Time) {
+	if w.WindowStart.IsZero() {
+		w.WindowStart = now.UTC()
+	}
+}
+
 // ensureAliasWindow applies the same window logic to a per-alias daily/weekly slice.
 func (l *usageLedger) ensureAliasWindowLocked(w *UsageWindow, daily bool, now time.Time) {
 	if daily {
@@ -137,54 +144,69 @@ func (l *usageLedger) RecordCost(id, alias string, amount, cacheCost float64, ca
 	st := l.entryLocked(id)
 	l.ensureDailyWindowLocked(st, now)
 	l.ensureWeeklyWindowLocked(st, now)
+	l.ensureTotalWindowLocked(&st.Total, now)
 	st.Daily.TotalUSD += amount
 	st.Weekly.TotalUSD += amount
+	st.Total.TotalUSD += amount
 	st.Daily.CallCount += callCount
 	st.Weekly.CallCount += callCount
+	st.Total.CallCount += callCount
 	if cacheReadTokens > 0 {
 		st.Daily.CacheReadTokens += cacheReadTokens
 		st.Weekly.CacheReadTokens += cacheReadTokens
+		st.Total.CacheReadTokens += cacheReadTokens
 	}
 	if cacheCost > 0 {
 		st.Daily.CacheCostUSD += cacheCost
 		st.Weekly.CacheCostUSD += cacheCost
+		st.Total.CacheCostUSD += cacheCost
 	}
 	if inputTokens > 0 {
 		st.Daily.InputTokens += inputTokens
 		st.Weekly.InputTokens += inputTokens
+		st.Total.InputTokens += inputTokens
 	}
 	if outputTokens > 0 {
 		st.Daily.OutputTokens += outputTokens
 		st.Weekly.OutputTokens += outputTokens
+		st.Total.OutputTokens += outputTokens
 	}
 
 	aliasEntry := st.ByAlias[alias]
 	l.ensureAliasWindowLocked(&aliasEntry.Daily, true, now)
 	l.ensureAliasWindowLocked(&aliasEntry.Weekly, false, now)
+	l.ensureTotalWindowLocked(&aliasEntry.Total, now)
 	aliasEntry.Daily.TotalUSD += amount
 	aliasEntry.Weekly.TotalUSD += amount
+	aliasEntry.Total.TotalUSD += amount
 	aliasEntry.Daily.CallCount += callCount
 	aliasEntry.Weekly.CallCount += callCount
+	aliasEntry.Total.CallCount += callCount
 	aliasEntry.Daily.CacheReadTokens += cacheReadTokens
 	aliasEntry.Weekly.CacheReadTokens += cacheReadTokens
+	aliasEntry.Total.CacheReadTokens += cacheReadTokens
 	aliasEntry.Daily.CacheCostUSD += cacheCost
 	aliasEntry.Weekly.CacheCostUSD += cacheCost
+	aliasEntry.Total.CacheCostUSD += cacheCost
 	aliasEntry.Daily.InputTokens += inputTokens
 	aliasEntry.Weekly.InputTokens += inputTokens
+	aliasEntry.Total.InputTokens += inputTokens
 	aliasEntry.Daily.OutputTokens += outputTokens
 	aliasEntry.Weekly.OutputTokens += outputTokens
+	aliasEntry.Total.OutputTokens += outputTokens
 	st.ByAlias[alias] = aliasEntry
 }
 
-// UsageSummary is what the keys-list API reports for a key. The cache fields are
-// reported for both the daily and weekly windows so the UI can show today's and
-// the rolling-week's cache spend / hit-rate. CacheHitRate is not serialized
-// here; the UI derives it as cacheRead / (cacheRead + input).
+// UsageSummary is what the keys-list API reports for a key. Daily and weekly
+// windows reset automatically; TotalUSD is lifetime usage until an explicit
+// administrator reset.
 type UsageSummary struct {
 	DailyUSD              float64   `json:"daily_usd"`
 	WeeklyUSD             float64   `json:"weekly_usd"`
+	TotalUSD              float64   `json:"total_usd"`
 	DailyLimitUSD         float64   `json:"daily_limit_usd"`
 	WeeklyLimitUSD        float64   `json:"weekly_limit_usd"`
+	TotalLimitUSD         float64   `json:"total_limit_usd"`
 	DailyResetAt          time.Time `json:"daily_reset_at,omitempty"`
 	WeeklyResetAt         time.Time `json:"weekly_reset_at,omitempty"`
 	DailyCacheCostUSD     float64   `json:"daily_cache_cost_usd,omitempty"`
@@ -198,11 +220,12 @@ type UsageSummary struct {
 	// Reported for display only; not used for limit enforcement.
 	DailyCallCount  int64 `json:"daily_call_count,omitempty"`
 	WeeklyCallCount int64 `json:"weekly_call_count,omitempty"`
+	TotalCallCount  int64 `json:"total_call_count,omitempty"`
 }
 
 // Summary returns the current usage + limits for a key. Limits come from the
 // KeyConfig; usage from the ledger. daily_reset_at = next UTC midnight;
-// weekly_reset_at = window start + 7 days.
+// weekly_reset_at = window start + 7 days; lifetime total has no reset time.
 func (l *usageLedger) Summary(key KeyConfig) UsageSummary {
 	now := l.now()
 	l.mu.Lock()
@@ -211,6 +234,7 @@ func (l *usageLedger) Summary(key KeyConfig) UsageSummary {
 	summary := UsageSummary{
 		DailyLimitUSD:  key.DailyLimitUSD,
 		WeeklyLimitUSD: key.WeeklyLimitUSD,
+		TotalLimitUSD:  key.TotalLimitUSD,
 		DailyResetAt:   now.UTC().Truncate(dayWindow).Add(dayWindow),
 	}
 	if st == nil {
@@ -226,6 +250,7 @@ func (l *usageLedger) Summary(key KeyConfig) UsageSummary {
 	l.ensureWeeklyWindowLocked(&ensureSt, now)
 	summary.DailyUSD = ensureSt.Daily.TotalUSD
 	summary.WeeklyUSD = ensureSt.Weekly.TotalUSD
+	summary.TotalUSD = ensureSt.Total.TotalUSD
 	summary.DailyCacheCostUSD = ensureSt.Daily.CacheCostUSD
 	summary.WeeklyCacheCostUSD = ensureSt.Weekly.CacheCostUSD
 	summary.DailyCacheReadTokens = ensureSt.Daily.CacheReadTokens
@@ -234,17 +259,17 @@ func (l *usageLedger) Summary(key KeyConfig) UsageSummary {
 	summary.WeeklyInputTokens = ensureSt.Weekly.InputTokens
 	summary.DailyCallCount = ensureSt.Daily.CallCount
 	summary.WeeklyCallCount = ensureSt.Weekly.CallCount
+	summary.TotalCallCount = ensureSt.Total.CallCount
 	if !ensureSt.Weekly.WindowStart.IsZero() {
 		summary.WeeklyResetAt = ensureSt.Weekly.WindowStart.Add(weekWindow)
 	}
 	return summary
 }
 
-// OverLimit reports whether a key is over its daily or weekly dollar limit.
-// Returns the reason ("daily_exceeded"/"weekly_exceeded") and the offending
-// summary when over; "" and zero summary otherwise.
+// OverLimit reports whether a key is over its daily, weekly, or lifetime total
+// dollar limit.
 func (l *usageLedger) OverLimit(key KeyConfig) (string, UsageSummary) {
-	if key.DailyLimitUSD <= 0 && key.WeeklyLimitUSD <= 0 {
+	if key.DailyLimitUSD <= 0 && key.WeeklyLimitUSD <= 0 && key.TotalLimitUSD <= 0 {
 		return "", UsageSummary{}
 	}
 	s := l.Summary(key)
@@ -253,6 +278,9 @@ func (l *usageLedger) OverLimit(key KeyConfig) (string, UsageSummary) {
 	}
 	if key.WeeklyLimitUSD > 0 && s.WeeklyUSD >= key.WeeklyLimitUSD {
 		return "weekly_exceeded", s
+	}
+	if key.TotalLimitUSD > 0 && s.TotalUSD >= key.TotalLimitUSD {
+		return "total_exceeded", s
 	}
 	return "", UsageSummary{}
 }
@@ -268,7 +296,7 @@ func (l *usageLedger) resetUsage(id string) {
 // key detail API. Configured aliases appear with InConfig=true (zero values
 // when unused); aliases with historical usage that are no longer in the key's
 // config appear with InConfig=false. Daily/Weekly are the current (re-evaluated)
-// windows for that alias.
+// daily/weekly windows and lifetime total for that alias.
 type AliasUsageEntry struct {
 	Alias       string      `json:"alias"`
 	Provider    string      `json:"provider,omitempty"`
@@ -278,6 +306,7 @@ type AliasUsageEntry struct {
 	InConfig    bool        `json:"in_config"`
 	Daily       UsageWindow `json:"daily"`
 	Weekly      UsageWindow `json:"weekly"`
+	Total       UsageWindow `json:"total"`
 }
 
 // AliasUsage returns a per-alias usage breakdown for a key: configured aliases
@@ -315,6 +344,7 @@ func (l *usageLedger) AliasUsage(key KeyConfig) []AliasUsageEntry {
 			}
 			entry.Daily = w.Daily
 			entry.Weekly = w.Weekly
+			entry.Total = w.Total
 			byAlias[alias] = entry
 		}
 	}

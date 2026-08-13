@@ -19,13 +19,13 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { deleteKey, listKeys, patchKey, resetRPM, rotateKey } from "../api/keys";
+import { deleteKey, listKeys, patchKey, resetRPM, resetUsage, rotateKey } from "../api/keys";
 import PlainKeyModal from "../components/PlainKeyModal";
-import { useT } from "../i18n";
+import { getLocale, useT } from "../i18n";
 import { useUiPreferences } from "../store/uiPreferences";
 import type { KeyPublic } from "../types";
 
-type ConfirmAction = { kind: "delete" | "rotate"; key: KeyPublic } | null;
+type ConfirmAction = { kind: "delete" | "rotate" | "reset-usage"; key: KeyPublic } | null;
 const LOADING_ROW_KEYS = [
   "loading-row-1",
   "loading-row-2",
@@ -38,8 +38,26 @@ function usd(value: number): string {
   return `$${(Number.isFinite(value) ? value : 0).toFixed(2)}`;
 }
 
+function formatResetAt(value?: string): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date.getUTCFullYear() <= 1) return null;
+  return new Intl.DateTimeFormat(getLocale(), {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
 function aliasesOf(key: KeyPublic): string[] {
   return [...new Set((key.models ?? []).map((model) => model.alias).filter(Boolean))];
+}
+
+function isExpired(key: KeyPublic): boolean {
+  if (!key.expires_at) return false;
+  const expiresAt = new Date(key.expires_at);
+  return !Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() <= Date.now();
 }
 
 function ModelAliases({ aliases, visibleCount }: { aliases: string[]; visibleCount: number }) {
@@ -92,7 +110,8 @@ function budgetRatio(key: KeyPublic): number {
   const daily = key.usage.daily_limit_usd > 0 ? key.usage.daily_usd / key.usage.daily_limit_usd : 0;
   const weekly =
     key.usage.weekly_limit_usd > 0 ? key.usage.weekly_usd / key.usage.weekly_limit_usd : 0;
-  return Math.max(daily, weekly);
+  const total = key.usage.total_limit_usd > 0 ? key.usage.total_usd / key.usage.total_limit_usd : 0;
+  return Math.max(daily, weekly, total);
 }
 
 function StatusChip({ item }: { item: KeyPublic }) {
@@ -102,6 +121,12 @@ function StatusChip({ item }: { item: KeyPublic }) {
     return (
       <Chip size="sm" variant="soft" color="default">
         {t("keys.disabled")}
+      </Chip>
+    );
+  if (isExpired(item))
+    return (
+      <Chip size="sm" variant="soft" color="warning">
+        {t("keys.expired")}
       </Chip>
     );
   if (ratio >= 1)
@@ -127,6 +152,8 @@ function UsageBar({ item }: { item: KeyPublic }) {
   const t = useT();
   const limit = item.usage.daily_limit_usd;
   const ratio = limit > 0 ? item.usage.daily_usd / limit : 0;
+  const weeklyResetAt = formatResetAt(item.usage.weekly_reset_at);
+  const totalLimit = item.usage.total_limit_usd;
   return (
     <div className="grid min-w-36 gap-1">
       <div className="flex items-baseline gap-0.5 text-[11px]">
@@ -145,6 +172,19 @@ function UsageBar({ item }: { item: KeyPublic }) {
       )}
       <small className="text-[10px] text-[var(--muted)]">
         {t("usage.thisWeek")} {usd(item.usage.weekly_usd)}
+      </small>
+      <small className="text-[10px] text-[var(--muted)]">
+        {weeklyResetAt
+          ? t("usage.weeklyResetAt", { time: weeklyResetAt })
+          : t("usage.weeklyResetPending")}
+      </small>
+      <small className="text-[10px] text-[var(--muted)]">
+        {totalLimit > 0
+          ? t("usage.totalUsage", {
+              used: usd(item.usage.total_usd),
+              limit: usd(totalLimit),
+            })
+          : t("usage.totalUnlimited", { used: usd(item.usage.total_usd) })}
       </small>
     </div>
   );
@@ -165,6 +205,7 @@ function ConfirmDialog({
   const [typedId, setTypedId] = useState("");
   if (!action) return null;
   const deleting = action.kind === "delete";
+  const resettingUsage = action.kind === "reset-usage";
   const allowed = !deleting || typedId === action.key.id;
   return (
     <AlertDialog.Backdrop
@@ -177,11 +218,21 @@ function ConfirmDialog({
       <AlertDialog.Container placement="center" size="sm">
         <AlertDialog.Dialog>
           <AlertDialog.Header>
-            <AlertDialog.Icon status={deleting ? "danger" : "warning"}>
-              {deleting ? <Trash2 size={21} /> : <RotateCw size={21} />}
+            <AlertDialog.Icon status={deleting || resettingUsage ? "danger" : "warning"}>
+              {deleting ? (
+                <Trash2 size={21} />
+              ) : resettingUsage ? (
+                <CircleDollarSign size={21} />
+              ) : (
+                <RotateCw size={21} />
+              )}
             </AlertDialog.Icon>
             <AlertDialog.Heading>
-              {deleting ? t("app.deleteKey") : t("keys.rotate")}
+              {deleting
+                ? t("app.deleteKey")
+                : resettingUsage
+                  ? t("keys.resetUsage")
+                  : t("keys.rotate")}
             </AlertDialog.Heading>
           </AlertDialog.Header>
           <AlertDialog.Body>
@@ -190,7 +241,9 @@ function ConfirmDialog({
             >
               {deleting
                 ? t("keys.deleteConfirm", { id: action.key.id })
-                : t("keys.rotateConfirm", { id: action.key.id })}
+                : resettingUsage
+                  ? t("keys.resetUsageConfirm", { id: action.key.id })
+                  : t("keys.rotateConfirm", { id: action.key.id })}
             </p>
             {deleting && (
               <div>
@@ -212,11 +265,15 @@ function ConfirmDialog({
               {t("keyForm.cancel")}
             </Button>
             <Button
-              variant={deleting ? "danger" : "primary"}
+              variant={deleting || resettingUsage ? "danger" : "primary"}
               onPress={onConfirm}
               isDisabled={!allowed || busy}
             >
-              {deleting ? t("keys.delete") : t("keys.rotate")}
+              {deleting
+                ? t("keys.delete")
+                : resettingUsage
+                  ? t("keys.resetUsage")
+                  : t("keys.rotate")}
             </Button>
           </AlertDialog.Footer>
         </AlertDialog.Dialog>
@@ -277,6 +334,19 @@ function KeyActions({
       <Tooltip>
         <Tooltip.Trigger>
           <button
+            className="grid cursor-pointer size-8 place-items-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--danger-soft)] hover:text-[var(--danger)]"
+            type="button"
+            onClick={() => onConfirm({ kind: "reset-usage", key: item })}
+            aria-label={t("keys.resetUsage")}
+          >
+            <CircleDollarSign size={17} />
+          </button>
+        </Tooltip.Trigger>
+        <Tooltip.Content>{t("keys.resetUsage")}</Tooltip.Content>
+      </Tooltip>
+      <Tooltip>
+        <Tooltip.Trigger>
+          <button
             className="grid cursor-pointer size-8 place-items-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
             type="button"
             onClick={() => onConfirm({ kind: "rotate", key: item })}
@@ -314,6 +384,7 @@ function KeyCard({
   onConfirm: (action: ConfirmAction) => void;
 }) {
   const navigate = useNavigate();
+  const t = useT();
   const aliases = aliasesOf(item);
   const ratio = budgetRatio(item);
   return (
@@ -339,6 +410,10 @@ function KeyCard({
         <div className="flex items-center justify-between gap-2.5 rounded-xl bg-[var(--surface-secondary)] px-2.5 py-2 text-[10px] text-[var(--muted)]">
           <code>{item.key_preview}</code>
         </div>
+        <small className="text-[10px] text-[var(--muted)]">
+          {t("keyForm.expiresAtLabel")}：
+          {item.expires_at ? formatResetAt(item.expires_at) : t("keyForm.permanent")}
+        </small>
         <UsageBar item={item} />
         <ModelAliases aliases={aliases} visibleCount={3} />
         <div
@@ -427,8 +502,9 @@ export default function KeyList() {
         )
       )
         return false;
-      if (status === "enabled" && !item.enabled) return false;
+      if (status === "enabled" && (!item.enabled || isExpired(item))) return false;
       if (status === "disabled" && item.enabled) return false;
+      if (status === "expired" && (!item.enabled || !isExpired(item))) return false;
       const ratio = budgetRatio(item);
       if (budget === "near" && !(ratio >= 0.8 && ratio < 1)) return false;
       if (budget === "over" && ratio < 1) return false;
@@ -446,7 +522,7 @@ export default function KeyList() {
   const metrics = useMemo(
     () => ({
       total: keys.length,
-      enabled: keys.filter((item) => item.enabled).length,
+      enabled: keys.filter((item) => item.enabled && !isExpired(item)).length,
       spend: keys.reduce((sum, item) => sum + item.usage.daily_usd, 0),
       alerts: keys.filter((item) => budgetRatio(item) >= 0.8).length,
     }),
@@ -470,6 +546,9 @@ export default function KeyList() {
       if (confirmAction.kind === "delete") {
         await deleteKey(confirmAction.key.id);
         toast.success(t("app.keyDeleted"));
+      } else if (confirmAction.kind === "reset-usage") {
+        await resetUsage(confirmAction.key.id);
+        toast.success(t("keys.resetUsageOk"));
       } else {
         const result = await rotateKey(confirmAction.key.id);
         setPlain({ value: result.plain_key, title: t("keys.rotated") });
@@ -598,6 +677,7 @@ export default function KeyList() {
                     <ListBox.Item id="all">{t("app.allStatus")}</ListBox.Item>
                     <ListBox.Item id="enabled">{t("keys.enabled")}</ListBox.Item>
                     <ListBox.Item id="disabled">{t("keys.disabled")}</ListBox.Item>
+                    <ListBox.Item id="expired">{t("keys.expired")}</ListBox.Item>
                   </ListBox>
                 </Select.Popover>
               </Select>
@@ -786,6 +866,11 @@ export default function KeyList() {
                           <code className="max-w-56 truncate text-[10px] text-[var(--muted)]">
                             {item.id} · {item.key_preview}
                           </code>
+                          <small className="text-[10px] text-[var(--muted)]">
+                            {item.expires_at
+                              ? `${t("keyForm.expiresAtLabel")}：${formatResetAt(item.expires_at)}`
+                              : t("keyForm.permanent")}
+                          </small>
                         </span>
                       </Link>
                     </td>

@@ -52,9 +52,14 @@ type KeyConfig struct {
 	AllowModelsEndpoint bool    `yaml:"allow_models_endpoint,omitempty" json:"allow_models_endpoint,omitempty"`
 	DailyLimitUSD       float64 `yaml:"daily_limit_usd,omitempty" json:"daily_limit_usd,omitempty"`
 	// WeeklyLimitUSD caps the dollar usage over a rolling 7-day window. 0 = unlimited.
-	WeeklyLimitUSD float64   `yaml:"weekly_limit_usd,omitempty" json:"weekly_limit_usd,omitempty"`
-	CreatedAt      time.Time `yaml:"created_at,omitempty" json:"created_at,omitempty"`
-	UpdatedAt      time.Time `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
+	WeeklyLimitUSD float64 `yaml:"weekly_limit_usd,omitempty" json:"weekly_limit_usd,omitempty"`
+	// TotalLimitUSD caps lifetime dollar usage. It never resets automatically;
+	// only the management reset-usage action clears it. 0 = unlimited.
+	TotalLimitUSD float64 `yaml:"total_limit_usd,omitempty" json:"total_limit_usd,omitempty"`
+	// ExpiresAt is optional. Nil means the key remains valid permanently.
+	ExpiresAt *time.Time `yaml:"expires_at,omitempty" json:"expires_at,omitempty"`
+	CreatedAt time.Time  `yaml:"created_at,omitempty" json:"created_at,omitempty"`
+	UpdatedAt time.Time  `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
 }
 
 type ModelRule struct {
@@ -159,38 +164,40 @@ type KeyAliasRef struct {
 }
 
 // UsageState holds per-key dollar usage accounting persisted in the state JSON.
-// It carries rolling daily/weekly windows plus a per-alias breakdown
-// (ByAlias). The per-alias breakdown tracks BOTH a daily and a weekly window
-// (see AliasUsageWindows) so the key detail page can show per-alias today /
-// rolling-week figures.
+// It carries rolling daily/weekly windows, a non-resetting lifetime total, and
+// a per-alias breakdown (ByAlias). The per-alias breakdown tracks the same
+// three scopes so the key detail page can switch between them.
 //
 // Legacy state files stored ByAlias as map[string]UsageWindow (a single
-// window per alias). UsageState.UnmarshalJSON auto-migrates that shape into
-// the dual-window form (old value → Daily; Weekly zeroed).
+// window per alias). UsageState.UnmarshalJSON auto-migrates that shape and
+// seeds lifetime totals from the largest currently recoverable old window.
 type UsageState struct {
 	Daily   UsageWindow                  `json:"daily"`
 	Weekly  UsageWindow                  `json:"weekly"`
+	Total   UsageWindow                  `json:"total"`
 	ByAlias map[string]AliasUsageWindows `json:"by_alias,omitempty"`
 }
 
-// AliasUsageWindows holds the daily and rolling-weekly usage windows for a
+// AliasUsageWindows holds daily, rolling-weekly, and lifetime usage for a
 // single alias under a key. Replaces the legacy single-window ByAlias map;
 // old state files are auto-migrated on load (see UsageState.UnmarshalJSON).
 type AliasUsageWindows struct {
 	Daily  UsageWindow `json:"daily"`
 	Weekly UsageWindow `json:"weekly"`
+	Total  UsageWindow `json:"total"`
 }
 
 // UnmarshalJSON migrates the legacy ByAlias shape (map[string]UsageWindow,
-// a single window per alias) into the current dual-window form
-// (map[string]AliasUsageWindows). Detection is per-entry: an entry carrying a
-// "daily" or "weekly" key is read as the new form; otherwise it is read as a
-// bare UsageWindow and placed into Daily (Weekly zeroed). Unknown shapes are
-// skipped rather than failing the whole load.
+// a single window per alias) into the current multi-window form. Detection is
+// per-entry: an entry carrying a "daily" or "weekly" key is read as the newer
+// form; otherwise it is read as a bare UsageWindow. Missing lifetime totals
+// are seeded from the largest recoverable daily/weekly value. Unknown shapes
+// are skipped rather than failing the whole load.
 func (s *UsageState) UnmarshalJSON(raw []byte) error {
 	var p struct {
 		Daily   UsageWindow     `json:"daily"`
 		Weekly  UsageWindow     `json:"weekly"`
+		Total   *UsageWindow    `json:"total"`
 		ByAlias json.RawMessage `json:"by_alias,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -198,6 +205,11 @@ func (s *UsageState) UnmarshalJSON(raw []byte) error {
 	}
 	s.Daily = p.Daily
 	s.Weekly = p.Weekly
+	if p.Total != nil {
+		s.Total = *p.Total
+	} else {
+		s.Total = largerUsageWindow(p.Daily, p.Weekly)
+	}
 	s.ByAlias = make(map[string]AliasUsageWindows)
 	if len(p.ByAlias) == 0 || string(p.ByAlias) == "null" {
 		return nil
@@ -211,19 +223,55 @@ func (s *UsageState) UnmarshalJSON(raw []byte) error {
 			continue
 		}
 		if hasJSONKey(rawEntry, "daily") || hasJSONKey(rawEntry, "weekly") {
-			var w AliasUsageWindows
-			if err := json.Unmarshal(rawEntry, &w); err == nil {
+			var shaped struct {
+				Daily  UsageWindow  `json:"daily"`
+				Weekly UsageWindow  `json:"weekly"`
+				Total  *UsageWindow `json:"total"`
+			}
+			if err := json.Unmarshal(rawEntry, &shaped); err == nil {
+				w := AliasUsageWindows{Daily: shaped.Daily, Weekly: shaped.Weekly}
+				if shaped.Total != nil {
+					w.Total = *shaped.Total
+				} else {
+					w.Total = largerUsageWindow(w.Daily, w.Weekly)
+				}
 				s.ByAlias[alias] = w
 			}
 			continue
 		}
-		// Legacy single-window format: migrate into Daily (weekly zeroed).
+		// Legacy single-window format: migrate into Daily and seed Total.
 		var w UsageWindow
 		if err := json.Unmarshal(rawEntry, &w); err == nil {
-			s.ByAlias[alias] = AliasUsageWindows{Daily: w}
+			s.ByAlias[alias] = AliasUsageWindows{Daily: w, Total: w}
 		}
 	}
 	return nil
+}
+
+func largerUsageWindow(a, b UsageWindow) UsageWindow {
+	out := a
+	if b.TotalUSD > out.TotalUSD {
+		out.TotalUSD = b.TotalUSD
+	}
+	if b.CacheReadTokens > out.CacheReadTokens {
+		out.CacheReadTokens = b.CacheReadTokens
+	}
+	if b.CacheCostUSD > out.CacheCostUSD {
+		out.CacheCostUSD = b.CacheCostUSD
+	}
+	if b.InputTokens > out.InputTokens {
+		out.InputTokens = b.InputTokens
+	}
+	if b.OutputTokens > out.OutputTokens {
+		out.OutputTokens = b.OutputTokens
+	}
+	if b.CallCount > out.CallCount {
+		out.CallCount = b.CallCount
+	}
+	if out.WindowStart.IsZero() || (!b.WindowStart.IsZero() && b.WindowStart.Before(out.WindowStart)) {
+		out.WindowStart = b.WindowStart
+	}
+	return out
 }
 
 // hasJSONKey reports whether a JSON object literal contains the given object
@@ -453,6 +501,13 @@ func normalizeConfig(cfg *Config) error {
 		}
 		if key.WeeklyLimitUSD < 0 {
 			return fmt.Errorf("key %q weekly_limit_usd cannot be negative", key.ID)
+		}
+		if key.TotalLimitUSD < 0 {
+			return fmt.Errorf("key %q total_limit_usd cannot be negative", key.ID)
+		}
+		if key.ExpiresAt != nil {
+			expiresAt := key.ExpiresAt.UTC()
+			key.ExpiresAt = &expiresAt
 		}
 		for j := range key.Models {
 			model := &key.Models[j]

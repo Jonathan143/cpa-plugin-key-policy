@@ -3,6 +3,39 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (() => {
+        const hostStyleSelector = 'style[data-cpamp-plugin-host="true"]';
+        const inertStyleType = "text/unprocessed-css";
+
+        const neutralizeHostStyle = (element) => {
+          if (element.getAttribute("type") !== inertStyleType) {
+            element.setAttribute("type", inertStyleType);
+          }
+        };
+
+        const scanHostStyles = (root) => {
+          if (root instanceof Element && root.matches(hostStyleSelector)) {
+            neutralizeHostStyle(root);
+          }
+
+          root.querySelectorAll?.(hostStyleSelector).forEach(neutralizeHostStyle);
+        };
+
+        scanHostStyles(document);
+
+        new MutationObserver((records) => {
+          for (const record of records) {
+            record.addedNodes.forEach((node) => {
+              if (node instanceof Element) scanHostStyles(node);
+            });
+          }
+        }).observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+        });
+      })();
+    </script>
     <title>cpa-key-policy 管理面板</title>
   </head>
   <body>

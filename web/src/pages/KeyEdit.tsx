@@ -119,6 +119,8 @@ export default function KeyEdit() {
             models: value.models,
             daily_limit_usd: value.daily_limit_usd,
             weekly_limit_usd: value.weekly_limit_usd,
+            total_limit_usd: value.total_limit_usd,
+            expires_at: value.expires_at,
             allow_models_endpoint: value.allow_models_endpoint,
           });
           toast.success(t("app.changesSaved"));

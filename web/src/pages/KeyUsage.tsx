@@ -1,10 +1,11 @@
-import { Button, Chip } from "@heroui/react";
+import { AlertDialog, Button, Chip, toast } from "@heroui/react";
 import type { LucideIcon } from "lucide-react";
 import {
   Activity,
   ArrowDownToLine,
   ArrowLeft,
   ArrowUpFromLine,
+  CircleDollarSign,
   Coins,
   Database,
   Pencil,
@@ -12,12 +13,12 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { fetchKeyUsage } from "../api/keys";
+import { fetchKeyUsage, resetUsage } from "../api/keys";
 import LoadingState from "../components/LoadingState";
-import { useT } from "../i18n";
+import { getLocale, useT } from "../i18n";
 import type { AliasUsageEntry, KeyUsageResponse, UsageWindow } from "../types";
 
-type WindowName = "daily" | "weekly";
+type WindowName = "daily" | "weekly" | "total";
 
 interface UsageSummary {
   spend: number;
@@ -30,6 +31,18 @@ interface UsageSummary {
 
 function usd(value: number): string {
   return `$${(Number.isFinite(value) ? value : 0).toFixed(2)}`;
+}
+
+function formatResetAt(value?: string): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date.getUTCFullYear() <= 1) return null;
+  return new Intl.DateTimeFormat(getLocale(), {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function integer(value: number): string {
@@ -75,6 +88,7 @@ export default function KeyUsage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [windowName, setWindowName] = useState<WindowName>("daily");
+  const [confirmReset, setConfirmReset] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -104,6 +118,7 @@ export default function KeyUsage() {
     return {
       daily: summarize(aliases, "daily"),
       weekly: summarize(aliases, "weekly"),
+      total: summarize(aliases, "total"),
     };
   }, [data]);
 
@@ -132,6 +147,18 @@ export default function KeyUsage() {
 
   const aliases = data.aliases ?? [];
   const currentWindow = (alias: AliasUsageEntry): UsageWindow => alias[windowName];
+  const weeklyResetAt = formatResetAt(data.weekly_reset_at);
+
+  const resetQuota = async () => {
+    try {
+      await resetUsage(data.key_id);
+      setConfirmReset(false);
+      toast.success(t("keys.resetUsageOk"));
+      await refresh();
+    } catch (caught) {
+      toast.danger((caught as Error).message ?? t("keys.resetFailed"));
+    }
+  };
 
   const spendCards = [
     {
@@ -149,6 +176,18 @@ export default function KeyUsage() {
       summary: summaries.weekly,
       tone: "bg-emerald-500",
       chipTone: "bg-emerald-500/10 text-emerald-600",
+      resetText: weeklyResetAt
+        ? t("usage.weeklyResetAt", { time: weeklyResetAt })
+        : t("usage.weeklyResetPending"),
+    },
+    {
+      name: "total" as const,
+      label: t("keyUsage.mobile.totalSpend"),
+      limit: data.total_limit_usd,
+      summary: summaries.total,
+      tone: "bg-violet-500",
+      chipTone: "bg-violet-500/10 text-violet-600",
+      resetText: t("usage.noAutoReset"),
     },
   ];
 
@@ -156,6 +195,7 @@ export default function KeyUsage() {
     label: string;
     daily: string;
     weekly: string;
+    total: string;
     icon: LucideIcon;
     tone: string;
   }> = [
@@ -163,6 +203,7 @@ export default function KeyUsage() {
       label: t("keyUsage.colCalls"),
       daily: integer(summaries.daily.calls),
       weekly: integer(summaries.weekly.calls),
+      total: integer(summaries.total.calls),
       icon: Activity,
       tone: "bg-indigo-500/10 text-indigo-500",
     },
@@ -170,6 +211,7 @@ export default function KeyUsage() {
       label: t("keyUsage.colTotalTokens"),
       daily: compactTokens(summaries.daily.totalTokens),
       weekly: compactTokens(summaries.weekly.totalTokens),
+      total: compactTokens(summaries.total.totalTokens),
       icon: Coins,
       tone: "bg-violet-500/10 text-violet-500",
     },
@@ -177,6 +219,7 @@ export default function KeyUsage() {
       label: t("keyUsage.colInput"),
       daily: compactTokens(summaries.daily.input),
       weekly: compactTokens(summaries.weekly.input),
+      total: compactTokens(summaries.total.input),
       icon: ArrowDownToLine,
       tone: "bg-blue-500/10 text-blue-500",
     },
@@ -184,6 +227,7 @@ export default function KeyUsage() {
       label: t("keyUsage.colOutput"),
       daily: compactTokens(summaries.daily.output),
       weekly: compactTokens(summaries.weekly.output),
+      total: compactTokens(summaries.total.output),
       icon: ArrowUpFromLine,
       tone: "bg-orange-500/10 text-orange-500",
     },
@@ -191,6 +235,7 @@ export default function KeyUsage() {
       label: t("keyUsage.colCache"),
       daily: compactTokens(summaries.daily.cached),
       weekly: compactTokens(summaries.weekly.cached),
+      total: compactTokens(summaries.total.cached),
       icon: Database,
       tone: "bg-emerald-500/10 text-emerald-600",
     },
@@ -214,9 +259,17 @@ export default function KeyUsage() {
             <p className="m-0 font-mono text-xs text-[var(--muted)]">
               {data.key_id} · {data.key_name}
             </p>
+            <p className="mb-0 mt-1 text-xs text-[var(--muted)]">
+              {t("keyForm.expiresAtLabel")}：
+              {data.expires_at ? formatResetAt(data.expires_at) : t("keyForm.permanent")}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="danger" onPress={() => setConfirmReset(true)}>
+            <CircleDollarSign size={16} />
+            {t("keys.resetUsage")}
+          </Button>
           <Button variant="secondary" onPress={refresh} isDisabled={refreshing}>
             <RefreshCw className={refreshing ? "animate-spin" : ""} size={16} />
             {refreshing ? t("keyUsage.refreshing") : t("keyUsage.refresh")}
@@ -236,7 +289,7 @@ export default function KeyUsage() {
         </div>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-3">
         {spendCards.map((card) => {
           const ratio = card.limit > 0 ? card.summary.spend / card.limit : 0;
           const percentage = Math.round(ratio * 100);
@@ -274,13 +327,18 @@ export default function KeyUsage() {
                     : t("keyUsage.mobile.noLimit")}
                 </span>
               </div>
+              {card.resetText && (
+                <p className="mb-0 mt-3 border-t border-[var(--separator)] pt-3 text-xs text-[var(--muted)]">
+                  {card.resetText}
+                </p>
+              )}
             </div>
           );
         })}
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
-        {metricCards.map(({ label, daily, weekly, icon: Icon, tone }) => (
+        {metricCards.map(({ label, daily, weekly, total, icon: Icon, tone }) => (
           <div
             key={label}
             className="flex min-h-28 items-center gap-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm"
@@ -295,6 +353,9 @@ export default function KeyUsage() {
               <strong className="block text-2xl font-bold tabular-nums">{daily}</strong>
               <small className="block truncate text-[11px] text-[var(--muted)]">
                 {t("keyUsage.tabWeekly")} {weekly}
+              </small>
+              <small className="block truncate text-[11px] text-[var(--muted)]">
+                {t("keyUsage.tabTotal")} {total}
               </small>
             </div>
           </div>
@@ -331,6 +392,15 @@ export default function KeyUsage() {
               onClick={() => setWindowName("weekly")}
             >
               {t("keyUsage.tabWeekly")}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={windowName === "total"}
+              className={`rounded-lg px-4 py-2 text-xs ${windowName === "total" ? "bg-[var(--surface)] font-semibold shadow-sm" : "text-[var(--muted)]"}`}
+              onClick={() => setWindowName("total")}
+            >
+              {t("keyUsage.tabTotal")}
             </button>
           </div>
         </div>
@@ -407,6 +477,35 @@ export default function KeyUsage() {
           </div>
         )}
       </div>
+      {confirmReset && (
+        <AlertDialog.Backdrop
+          isOpen
+          onOpenChange={setConfirmReset}
+          className="bg-slate-950/65 p-4 backdrop-blur-md"
+        >
+          <AlertDialog.Container placement="center" size="sm">
+            <AlertDialog.Dialog>
+              <AlertDialog.Header>
+                <AlertDialog.Icon status="danger">
+                  <CircleDollarSign size={21} />
+                </AlertDialog.Icon>
+                <AlertDialog.Heading>{t("keys.resetUsage")}</AlertDialog.Heading>
+              </AlertDialog.Header>
+              <AlertDialog.Body>
+                {t("keys.resetUsageConfirm", { id: data.key_id })}
+              </AlertDialog.Body>
+              <AlertDialog.Footer>
+                <Button variant="tertiary" onPress={() => setConfirmReset(false)}>
+                  {t("keyForm.cancel")}
+                </Button>
+                <Button variant="danger" onPress={resetQuota}>
+                  {t("keys.resetUsage")}
+                </Button>
+              </AlertDialog.Footer>
+            </AlertDialog.Dialog>
+          </AlertDialog.Container>
+        </AlertDialog.Backdrop>
+      )}
     </section>
   );
 }

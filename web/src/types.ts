@@ -28,8 +28,10 @@ export interface ModelRule {
 export interface UsageSummary {
   daily_usd: number;
   weekly_usd: number;
+  total_usd: number;
   daily_limit_usd: number;
   weekly_limit_usd: number;
+  total_limit_usd: number;
   daily_reset_at?: string;
   weekly_reset_at?: string;
   // Cache reporting (omitted when zero). Hit-rate is derived client-side as
@@ -44,6 +46,7 @@ export interface UsageSummary {
   // per-call). Failed requests don't count. Display only.
   daily_call_count?: number;
   weekly_call_count?: number;
+  total_call_count?: number;
 }
 
 export interface KeyPublic {
@@ -56,6 +59,8 @@ export interface KeyPublic {
   aliases?: KeyAliasRef[];
   daily_limit_usd: number;
   weekly_limit_usd: number;
+  total_limit_usd: number;
+  expires_at?: string;
   // Per-key override for GET /v1/models (see KeyFormValues).
   allow_models_endpoint?: boolean;
   usage: UsageSummary;
@@ -73,6 +78,8 @@ export interface KeyWriteRequest {
   aliases?: KeyAliasRef[];
   daily_limit_usd?: number;
   weekly_limit_usd?: number;
+  total_limit_usd?: number;
+  expires_at?: string;
   allow_models_endpoint?: boolean;
 }
 
@@ -90,7 +97,7 @@ export interface RotateKeyResponse {
 
 // UsageWindow mirrors policy.UsageWindow: a dollar total bound to a window
 // start, plus cache/input/output/call counters for display. The key detail
-// page reads one Daily and one Weekly per alias.
+// page reads daily, weekly, and lifetime totals per alias.
 export interface UsageWindow {
   total_usd: number;
   window_start?: string;
@@ -114,6 +121,7 @@ export interface AliasUsageEntry {
   in_config: boolean;
   daily: UsageWindow;
   weekly: UsageWindow;
+  total: UsageWindow;
 }
 
 export interface KeyUsageResponse {
@@ -121,6 +129,10 @@ export interface KeyUsageResponse {
   key_name: string;
   daily_limit_usd: number;
   weekly_limit_usd: number;
+  total_limit_usd: number;
+  total_usd: number;
+  weekly_reset_at?: string;
+  expires_at?: string;
   aliases: AliasUsageEntry[];
 }
 

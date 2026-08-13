@@ -20,6 +20,12 @@ plugins:
           key_hash: "sha256:replace-with-hash"
           key_preview: "cpa_abc...xyz"
           rpm: 60
+          daily_limit_usd: 5
+          weekly_limit_usd: 20
+          # Lifetime usage cap; never resets automatically. 0/omitted = unlimited.
+          total_limit_usd: 100
+          # Optional RFC3339 timestamp. Omit for permanent validity.
+          expires_at: "2027-01-01T00:00:00Z"
           # Either bind models directly…
           models:
             - alias: "fast"

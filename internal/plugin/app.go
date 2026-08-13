@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"cpa-key-policy/internal/plugin/web"
 	"cpa-key-policy/internal/policy"
@@ -488,6 +489,7 @@ func (a *App) managementRegistration() ManagementRegistrationResponse {
 			{Method: http.MethodDelete, Path: base + "/keys", Description: "Delete a downstream CPA key policy by id."},
 			{Method: http.MethodPost, Path: base + "/keys/rotate", Description: "Rotate one downstream CPA key by id."},
 			{Method: http.MethodPost, Path: base + "/keys/reset-rpm", Description: "Reset one downstream CPA key RPM counter by id."},
+			{Method: http.MethodPost, Path: base + "/keys/reset-usage", Description: "Reset all quota usage for one downstream CPA key by id."},
 			{Method: http.MethodGet, Path: base + "/keys/usage", Description: "Per-alias usage breakdown for one downstream CPA key by id."},
 			{Method: http.MethodGet, Path: base + "/status", Description: "Show cpa-key-policy runtime status."},
 			{Method: http.MethodGet, Path: base + "/aliases", Description: "List the global alias mapping table."},
@@ -535,6 +537,8 @@ func (a *App) handleManagement(raw []byte) ([]byte, error) {
 		return OKEnvelope(a.rotateKey(idFromRequest(req.Query, req.Body)))
 	case req.Method == http.MethodPost && path == base+"/keys/reset-rpm":
 		return OKEnvelope(a.resetRPM(idFromRequest(req.Query, req.Body)))
+	case req.Method == http.MethodPost && path == base+"/keys/reset-usage":
+		return OKEnvelope(a.resetUsage(idFromRequest(req.Query, req.Body)))
 	case req.Method == http.MethodGet && path == base+"/keys/usage":
 		return OKEnvelope(a.keyUsage(idFromRequest(req.Query, req.Body)))
 	case req.Method == http.MethodGet && path == base+"/status":
@@ -572,6 +576,8 @@ type keyWriteRequest struct {
 	Aliases             []policy.KeyAliasRef `json:"aliases,omitempty"`
 	DailyLimitUSD       *float64             `json:"daily_limit_usd,omitempty"`
 	WeeklyLimitUSD      *float64             `json:"weekly_limit_usd,omitempty"`
+	TotalLimitUSD       *float64             `json:"total_limit_usd,omitempty"`
+	ExpiresAt           *string              `json:"expires_at,omitempty"`
 	AllowModelsEndpoint *bool                `json:"allow_models_endpoint,omitempty"`
 }
 
@@ -585,6 +591,8 @@ type publicKey struct {
 	Aliases             []policy.KeyAliasRef `json:"aliases"`
 	DailyLimitUSD       float64              `json:"daily_limit_usd"`
 	WeeklyLimitUSD      float64              `json:"weekly_limit_usd"`
+	TotalLimitUSD       float64              `json:"total_limit_usd"`
+	ExpiresAt           string               `json:"expires_at,omitempty"`
 	AllowModelsEndpoint bool                 `json:"allow_models_endpoint,omitempty"`
 	Usage               policy.UsageSummary  `json:"usage"`
 	CreatedAt           string               `json:"created_at,omitempty"`
@@ -629,6 +637,10 @@ func (a *App) createKey(body []byte) ManagementResponse {
 	if req.Name != nil && strings.TrimSpace(*req.Name) != "" {
 		name = strings.TrimSpace(*req.Name)
 	}
+	expiresAt, err := parseExpiresAt(req.ExpiresAt)
+	if err != nil {
+		return jsonError(http.StatusBadRequest, "invalid_expiry", err.Error())
+	}
 	item := policy.KeyConfig{
 		ID:                  req.ID,
 		Name:                name,
@@ -640,6 +652,8 @@ func (a *App) createKey(body []byte) ManagementResponse {
 		Aliases:             req.Aliases,
 		DailyLimitUSD:       applyFloat64(req.DailyLimitUSD, 0),
 		WeeklyLimitUSD:      applyFloat64(req.WeeklyLimitUSD, 0),
+		TotalLimitUSD:       applyFloat64(req.TotalLimitUSD, 0),
+		ExpiresAt:           expiresAt,
 		AllowModelsEndpoint: applyBool(req.AllowModelsEndpoint, false),
 	}
 	if err := a.store.UpsertKey(item, true); err != nil {
@@ -688,6 +702,16 @@ func (a *App) patchKey(body []byte) ManagementResponse {
 	}
 	if req.WeeklyLimitUSD != nil {
 		current.WeeklyLimitUSD = *req.WeeklyLimitUSD
+	}
+	if req.TotalLimitUSD != nil {
+		current.TotalLimitUSD = *req.TotalLimitUSD
+	}
+	if req.ExpiresAt != nil {
+		expiresAt, err := parseExpiresAt(req.ExpiresAt)
+		if err != nil {
+			return jsonError(http.StatusBadRequest, "invalid_expiry", err.Error())
+		}
+		current.ExpiresAt = expiresAt
 	}
 	if req.AllowModelsEndpoint != nil {
 		current.AllowModelsEndpoint = *req.AllowModelsEndpoint
@@ -738,6 +762,13 @@ func (a *App) resetRPM(id string) ManagementResponse {
 	return jsonResponse(http.StatusOK, map[string]any{"reset": true, "id": strings.TrimSpace(id)})
 }
 
+func (a *App) resetUsage(id string) ManagementResponse {
+	if err := a.store.ResetUsage(id); err != nil {
+		return storeError(err)
+	}
+	return jsonResponse(http.StatusOK, map[string]any{"reset": true, "id": strings.TrimSpace(id)})
+}
+
 // keyUsage returns the per-alias usage breakdown for one downstream key (the
 // key detail subpage data source). id is taken from the query string (or body),
 // matching the rotate/reset-rpm/delete convention.
@@ -750,11 +781,20 @@ func (a *App) keyUsage(id string) ManagementResponse {
 	if !ok {
 		return jsonError(http.StatusNotFound, "not_found", "key not found")
 	}
+	usage := a.store.UsageSummaryFor(key)
+	expiresAt := ""
+	if key.ExpiresAt != nil {
+		expiresAt = key.ExpiresAt.UTC().Format(time.RFC3339)
+	}
 	return jsonResponse(http.StatusOK, map[string]any{
 		"key_id":           key.ID,
 		"key_name":         key.Name,
 		"daily_limit_usd":  key.DailyLimitUSD,
 		"weekly_limit_usd": key.WeeklyLimitUSD,
+		"total_limit_usd":  key.TotalLimitUSD,
+		"total_usd":        usage.TotalUSD,
+		"weekly_reset_at":  usage.WeeklyResetAt,
+		"expires_at":       expiresAt,
 		"aliases":          aliases,
 	})
 }
@@ -810,8 +850,12 @@ func (a *App) publicKeyFromConfig(key policy.KeyConfig) publicKey {
 		Aliases:             append([]policy.KeyAliasRef{}, key.Aliases...),
 		DailyLimitUSD:       key.DailyLimitUSD,
 		WeeklyLimitUSD:      key.WeeklyLimitUSD,
+		TotalLimitUSD:       key.TotalLimitUSD,
 		AllowModelsEndpoint: key.AllowModelsEndpoint,
 		Usage:               a.store.UsageSummaryFor(key),
+	}
+	if key.ExpiresAt != nil {
+		out.ExpiresAt = key.ExpiresAt.UTC().Format(time.RFC3339)
 	}
 	if !key.CreatedAt.IsZero() {
 		out.CreatedAt = key.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
@@ -820,6 +864,18 @@ func (a *App) publicKeyFromConfig(key policy.KeyConfig) publicKey {
 		out.UpdatedAt = key.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 	return out
+}
+
+func parseExpiresAt(value *string) (*time.Time, error) {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return nil, nil
+	}
+	expiresAt, err := time.Parse(time.RFC3339, strings.TrimSpace(*value))
+	if err != nil {
+		return nil, fmt.Errorf("expires_at must be an RFC3339 timestamp")
+	}
+	expiresAt = expiresAt.UTC()
+	return &expiresAt, nil
 }
 
 func applyFloat64(v *float64, def float64) float64 {

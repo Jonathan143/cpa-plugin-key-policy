@@ -32,7 +32,8 @@
 
 - 允许的 **模型** 和/或 **别名**
 - RPM
-- 每日 / 每周美元上限（可选）
+- 每日 / 每周 / 总美元上限（可选；总限额仅支持管理员手动重置）
+- 有效期（可选；不配置则永久有效）
 - 是否允许主端口访问 `/v1/models`（见下文）
 
 ### 别名（全局映射表）
@@ -162,7 +163,7 @@ VITE_CPA_BASE=http://127.0.0.1:8317 pnpm dev
 
 路径为精确匹配。鉴权：CPA 管理 Bearer。
 
-**Key：** `GET/POST/PATCH/DELETE …/keys`，以及 `rotate` / `reset-rpm` / `usage` / `status`  
+**Key：** `GET/POST/PATCH/DELETE …/keys`，以及 `rotate` / `reset-rpm` / `reset-usage` / `usage` / `status`  
 
 **别名：** `GET/POST/DELETE …/aliases`  
 
@@ -182,6 +183,10 @@ curl -X POST "$CPA/v0/management/plugins/cpa-key-policy/keys" \
     "id": "team-a",
     "name": "Team A",
     "rpm": 60,
+    "daily_limit_usd": 5,
+    "weekly_limit_usd": 20,
+    "total_limit_usd": 100,
+    "expires_at": "2027-01-01T00:00:00Z",
     "models": [
       {"alias":"fast","provider":"codex","target_model":"gpt-5.4-mini","group":"free"}
     ]

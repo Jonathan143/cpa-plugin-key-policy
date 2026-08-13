@@ -13,7 +13,7 @@ import {
   ShieldCheck,
   Trash2,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   classifyPreview,
@@ -459,16 +459,19 @@ export function AliasEditForm() {
   const location = useLocation();
   const { aliasName } = useParams();
   const isNew = aliasName === "new" || !aliasName;
+  const decodedAliasName = decodeURIComponent(aliasName ?? "");
   const returned = location.state as {
     draftAlias?: AliasMapping;
     pickedTargets?: AliasTarget[];
   } | null;
+  const initialDraft = useRef(returned?.draftAlias ?? readDraft()).current;
+  const shouldLoadExisting =
+    !isNew && !returned?.draftAlias && initialDraft?.alias !== decodedAliasName;
   const [value, setValue] = useState<AliasMapping>(() => {
-    const draft = returned?.draftAlias ?? readDraft();
-    return draft
-      ? { ...draft, targets: returned?.pickedTargets ?? draft.targets }
+    return initialDraft
+      ? { ...initialDraft, targets: returned?.pickedTargets ?? initialDraft.targets }
       : {
-          alias: isNew ? "" : decodeURIComponent(aliasName ?? ""),
+          alias: isNew ? "" : decodedAliasName,
           targets: [],
           dispatch: "round-robin",
           billing_mode: "tokens",
@@ -478,21 +481,32 @@ export function AliasEditForm() {
           per_call_usd: 0,
         };
   });
+  const [ready, setReady] = useState(!shouldLoadExisting);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   useEffect(() => {
+    if (!ready) return;
     writeDraft(value);
-  }, [value]);
+  }, [ready, value]);
   useEffect(() => {
-    if (isNew || returned?.draftAlias || readDraft()?.alias === decodeURIComponent(aliasName ?? ""))
-      return;
+    if (!shouldLoadExisting) return;
+    let alive = true;
     void fetchAliases()
       .then((items) => {
-        const found = items.find((item) => item.alias === decodeURIComponent(aliasName ?? ""));
+        if (!alive) return;
+        const found = items.find((item) => item.alias === decodedAliasName);
         if (found) setValue(found);
       })
-      .catch((caught) => setError(String(caught)));
-  }, [aliasName, isNew, returned?.draftAlias]);
+      .catch((caught) => {
+        if (alive) setError(String(caught));
+      })
+      .finally(() => {
+        if (alive) setReady(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [decodedAliasName, shouldLoadExisting]);
   useEffect(() => {
     const pickedTargets = returned?.pickedTargets;
     if (!pickedTargets) return;

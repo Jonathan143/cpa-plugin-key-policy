@@ -21,6 +21,7 @@
   "dependencies": {
     "@heroui/react": "^3.2.4",
     "@heroui/styles": "^3.2.4",
+    "@internationalized/date": "^3.12.3",
     "axios": "^1.19.0",
     "lucide-react": "^0.544.0",
     "motion": "^12.23.12",

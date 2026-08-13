@@ -1,4 +1,18 @@
-import { Button, Chip, Input, Switch, Tooltip } from "@heroui/react";
+import type { DateValue, TimeValue } from "@heroui/react";
+import {
+  Button,
+  Calendar,
+  Chip,
+  DateField,
+  DatePicker,
+  Description,
+  Input,
+  Label,
+  Switch,
+  TimeField,
+  Tooltip,
+} from "@heroui/react";
+import { fromDate, getLocalTimeZone } from "@internationalized/date";
 import { Gauge, KeyRound, Plus, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -56,12 +70,15 @@ function parseNum(value: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function toLocalDateTime(value?: string): string {
-  if (!value) return "";
+function toExpirationValue(value?: string): DateValue | null {
+  if (!value) return null;
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const pad = (part: number) => String(part).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return Number.isNaN(date.getTime()) ? null : fromDate(date, getLocalTimeZone());
+}
+
+function expirationISO(value: DateValue | null): string {
+  if (!value) return "";
+  return ("timeZone" in value ? value.toDate() : value.toDate(getLocalTimeZone())).toISOString();
 }
 
 const emptyPrice: PriceRow = {
@@ -119,7 +136,9 @@ export default function KeyForm({
   const [dailyLimit, setDailyLimit] = useState(initial?.daily_limit_usd ?? 0);
   const [weeklyLimit, setWeeklyLimit] = useState(initial?.weekly_limit_usd ?? 0);
   const [totalLimit, setTotalLimit] = useState(initial?.total_limit_usd ?? 0);
-  const [expiresAt, setExpiresAt] = useState(toLocalDateTime(initial?.expires_at));
+  const [expiresAt, setExpiresAt] = useState<DateValue | null>(
+    toExpirationValue(initial?.expires_at),
+  );
   const [allowModels, setAllowModels] = useState(initial?.allow_models_endpoint ?? false);
   const [models, setModels] = useState<ModelRule[]>(initial?.models ?? []);
   const [prices, setPrices] = useState<Record<string, PriceRow>>(() =>
@@ -177,7 +196,7 @@ export default function KeyForm({
         if (draft.daily_limit_usd !== undefined) setDailyLimit(draft.daily_limit_usd);
         if (draft.weekly_limit_usd !== undefined) setWeeklyLimit(draft.weekly_limit_usd);
         if (draft.total_limit_usd !== undefined) setTotalLimit(draft.total_limit_usd);
-        if (draft.expires_at !== undefined) setExpiresAt(draft.expires_at);
+        if (draft.expires_at !== undefined) setExpiresAt(toExpirationValue(draft.expires_at));
         if (draft.allow_models_endpoint !== undefined) setAllowModels(draft.allow_models_endpoint);
         if (draft.models && !preferInitialModels) setModels(draft.models);
         if (draft.prices && !preferInitialModels) setPrices(draft.prices);
@@ -205,7 +224,7 @@ export default function KeyForm({
           daily_limit_usd: dailyLimit,
           weekly_limit_usd: weeklyLimit,
           total_limit_usd: totalLimit,
-          expires_at: expiresAt,
+          expires_at: expirationISO(expiresAt),
           allow_models_endpoint: allowModels,
           prices,
           wizardStep,
@@ -359,7 +378,7 @@ export default function KeyForm({
           daily_limit_usd: dailyLimit,
           weekly_limit_usd: weeklyLimit,
           total_limit_usd: totalLimit,
-          expires_at: expiresAt,
+          expires_at: expirationISO(expiresAt),
           allow_models_endpoint: allowModels,
           prices,
         },
@@ -383,11 +402,6 @@ export default function KeyForm({
   const submit = async () => {
     setLocalError("");
     if (!validateId()) return;
-    const expiration = expiresAt ? new Date(expiresAt) : null;
-    if (expiration && Number.isNaN(expiration.getTime())) {
-      setLocalError(t("keyForm.expiryInvalid"));
-      return;
-    }
     setBusy(true);
     try {
       await onSubmit({
@@ -398,7 +412,7 @@ export default function KeyForm({
         daily_limit_usd: dailyLimit,
         weekly_limit_usd: weeklyLimit,
         total_limit_usd: totalLimit,
-        expires_at: expiration ? expiration.toISOString() : "",
+        expires_at: expirationISO(expiresAt),
         allow_models_endpoint: allowModels,
         models: models.map((model) => ({ ...model, ...(prices[priceKey(model)] ?? emptyPrice) })),
       });
@@ -533,16 +547,87 @@ export default function KeyForm({
             />
           </div>
           <div>
-            <label className={labelClass}>{t("keyForm.expiresAtLabel")}</label>
-            <input
-              className={numberClass}
-              type="datetime-local"
+            <DatePicker
+              className="w-full"
+              granularity="minute"
+              hideTimeZone
+              hourCycle={24}
+              name="expires_at"
               value={expiresAt}
-              onChange={(event) => setExpiresAt(event.target.value)}
-            />
-            <p className="mb-0 mt-1.5 text-[10px] text-[var(--muted)]">
-              {t("keyForm.expiresAtHint")}
-            </p>
+              onChange={setExpiresAt}
+            >
+              {({ state }) => (
+                <>
+                  <Label>{t("keyForm.expiresAtLabel")}</Label>
+                  <DateField.Group fullWidth>
+                    <DateField.Input>
+                      {(segment) => <DateField.Segment segment={segment} />}
+                    </DateField.Input>
+
+                    <DateField.Suffix>
+                      <DatePicker.Trigger>
+                        <DatePicker.TriggerIndicator />
+                      </DatePicker.Trigger>
+                    </DateField.Suffix>
+                  </DateField.Group>
+                  <Description>{t("keyForm.expiresAtHint")}</Description>
+                  <DatePicker.Popover className="flex flex-col gap-3">
+                    <Calendar aria-label={t("keyForm.expiresCalendarLabel")}>
+                      <Calendar.Header>
+                        <Calendar.YearPickerTrigger>
+                          <Calendar.YearPickerTriggerHeading />
+                          <Calendar.YearPickerTriggerIndicator />
+                        </Calendar.YearPickerTrigger>
+                        <Calendar.NavButton slot="previous" />
+                        <Calendar.NavButton slot="next" />
+                      </Calendar.Header>
+                      <Calendar.Grid>
+                        <Calendar.GridHeader>
+                          {(day) => <Calendar.HeaderCell>{day}</Calendar.HeaderCell>}
+                        </Calendar.GridHeader>
+                        <Calendar.GridBody>
+                          {(date) => <Calendar.Cell date={date} />}
+                        </Calendar.GridBody>
+                      </Calendar.Grid>
+                      <Calendar.YearPickerGrid>
+                        <Calendar.YearPickerGridBody>
+                          {({ year }) => <Calendar.YearPickerCell year={year} />}
+                        </Calendar.YearPickerGridBody>
+                      </Calendar.YearPickerGrid>
+                    </Calendar>
+                    <div className="flex items-center justify-between gap-3">
+                      <Button
+                        size="sm"
+                        type="button"
+                        variant="secondary"
+                        isDisabled={!expiresAt}
+                        onPress={() => setExpiresAt(null)}
+                      >
+                        {t("keyForm.permanent")}
+                      </Button>
+
+                      <div className="flex items-center gap-3">
+                        <Label>{t("keyForm.expiresTimeLabel")}</Label>
+                        <TimeField
+                          aria-label={t("keyForm.expiresTimeLabel")}
+                          granularity="minute"
+                          hideTimeZone
+                          hourCycle={24}
+                          value={state.timeValue}
+                          onChange={(value) => state.setTimeValue(value as TimeValue)}
+                        >
+                          <TimeField.Group variant="secondary">
+                            <TimeField.Input>
+                              {(segment) => <TimeField.Segment segment={segment} />}
+                            </TimeField.Input>
+                          </TimeField.Group>
+                        </TimeField>
+                      </div>
+                    </div>
+                  </DatePicker.Popover>
+                </>
+              )}
+            </DatePicker>
           </div>
           <div className="flex items-end">
             <Switch isSelected={enabled} onChange={setEnabled}>
@@ -859,7 +944,9 @@ export default function KeyForm({
             <div className="rounded-xl bg-[var(--surface-secondary)] p-3">
               <dt className="text-[var(--muted)]">{t("keyForm.expiresAtLabel")}</dt>
               <dd className="mt-1 font-semibold">
-                {expiresAt ? new Date(expiresAt).toLocaleString() : t("keyForm.permanent")}
+                {expiresAt
+                  ? new Date(expirationISO(expiresAt)).toLocaleString()
+                  : t("keyForm.permanent")}
               </dd>
             </div>
             <div className="rounded-xl bg-[var(--surface-secondary)] p-3">

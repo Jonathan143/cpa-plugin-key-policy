@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,6 +16,7 @@ type Store struct {
 	mu         sync.RWMutex
 	updateMu   sync.Mutex
 	persistMu  sync.Mutex
+	flushMu    sync.RWMutex
 	enabled    bool
 	statePath  string
 	keys       map[string]*KeyConfig
@@ -40,6 +42,9 @@ type Store struct {
 	// onClassifyRulesChanged is called when classify rules change, so the
 	// plugin can clear its classify cache. Set by the plugin App.
 	onClassifyRulesChanged func()
+	lastUsageFlushAt       time.Time
+	lastUsageFlushError    string
+	usageFlushFailures     int
 }
 
 // pendingPick is one Authenticate-time target selection waiting for Route.
@@ -306,12 +311,13 @@ func (s *Store) Authenticate(method, path string, headers http.Header, query map
 		decision.Reason = "rpm_exceeded"
 		return decision
 	}
-	// Dollar usage limit check (daily / weekly / lifetime total). Only enforced when a limit is
-	// set (>0). This is a pre-request gate; the request that pushes usage over
-	// the limit is allowed through, and the next request is rejected — matching
-	// the RPM limiter's "off-by-one" semantics.
+	// Atomically check actual usage plus estimates held for in-flight requests.
+	// This prevents concurrent requests from all consuming the same remaining
+	// budget. Per-call requests reserve their exact charge; token requests use a
+	// conservative estimate derived from the request body and configured prices.
 	if usageLedger != nil {
-		if reason, _ := usageLedger.OverLimit(*key); reason != "" {
+		reservationMicros := estimateReservationMicros(decision.Rule, body)
+		if reason := usageLedger.Reserve(*key, requested, reservationMicros); reason != "" {
 			decision.CostLimited = true
 			decision.Reason = reason
 			return decision
@@ -350,6 +356,56 @@ func (s *Store) Authenticate(method, path string, headers http.Header, query map
 	}
 
 	return decision
+}
+
+func estimateReservationMicros(rule ModelRule, body []byte) int64 {
+	if strings.EqualFold(rule.BillingMode, "per_call") {
+		return usdToMicros(rule.PerCallUSD)
+	}
+	if rule.Alias == "" {
+		return 0
+	}
+	// Estimate prompt volume from the serialized request and reserve the
+	// caller-declared output ceiling. When absent, use a modest default so
+	// concurrent unbounded requests still reserve meaningful capacity.
+	inputTokens := int64((len(body) + 3) / 4)
+	outputTokens := int64(4096)
+	if len(body) > 0 && json.Valid(body) {
+		var payload map[string]any
+		if json.Unmarshal(body, &payload) == nil {
+			for _, field := range []string{"max_output_tokens", "max_completion_tokens", "max_tokens"} {
+				if value := positiveInt64(payload[field]); value > 0 {
+					outputTokens = value
+					break
+				}
+			}
+		}
+	}
+	estimatedUSD := float64(inputTokens)/1_000_000*rule.InputPricePerMillion +
+		float64(outputTokens)/1_000_000*rule.OutputPricePerMillion
+	return usdToMicros(estimatedUSD)
+}
+
+func positiveInt64(value any) int64 {
+	switch n := value.(type) {
+	case float64:
+		if n > 0 {
+			return int64(n)
+		}
+	case int64:
+		if n > 0 {
+			return n
+		}
+	case int:
+		if n > 0 {
+			return int64(n)
+		}
+	case json.Number:
+		if parsed, err := n.Int64(); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func (s *Store) Route(headers http.Header, query map[string][]string, requested string) (ModelRule, string, bool) {
@@ -563,6 +619,13 @@ func (s *Store) RecordResponseCost(headers http.Header, query map[string][]strin
 // alias resolution: prefer the client-requested Alias (what the caller put in
 // the request body's "model" field); fall back to the resolved upstream Model.
 func (s *Store) RecordUsage(apiKeyOrID, alias, model string, failed bool, detail UsageDetail) float64 {
+	return s.RecordUsageWithID(apiKeyOrID, "", alias, model, failed, detail)
+}
+
+// RecordUsageWithID is RecordUsage with persistent idempotency. A non-empty
+// requestID is remembered in the key's UsageState so retries across process
+// restarts cannot double-charge the completed request.
+func (s *Store) RecordUsageWithID(apiKeyOrID, requestID, alias, model string, failed bool, detail UsageDetail) float64 {
 	if !s.Enabled() {
 		return 0
 	}
@@ -586,6 +649,12 @@ func (s *Store) RecordUsage(apiKeyOrID, alias, model string, failed bool, detail
 		return 0
 	}
 	rule, _ := key.ModelForAlias(resolved)
+	if failed {
+		if usageLedger != nil {
+			usageLedger.RecordCostMicros(key.ID, requestID, resolved, 0, 0, 0, 0, 0, 0, true)
+		}
+		return 0
+	}
 
 	// Per-call billing: a fixed USD charge per SUCCESSFUL request, independent
 	// of token counts. Failed requests are not charged and don't count. A
@@ -593,16 +662,15 @@ func (s *Store) RecordUsage(apiKeyOrID, alias, model string, failed bool, detail
 	// UI can report call volume. The token-price fields on the rule are dormant
 	// under this mode.
 	if strings.EqualFold(rule.BillingMode, "per_call") {
-		if failed {
-			return 0
-		}
 		cost := rule.PerCallUSD
 		if cost < 0 {
 			cost = 0
 		}
 		if usageLedger != nil {
 			// callCount=1 regardless of cost (even free calls count toward volume).
-			usageLedger.RecordCost(key.ID, resolved, cost, 0, 0, 0, 0, 1)
+			if recorded := usageLedger.RecordCostMicros(key.ID, requestID, resolved, usdToMicros(cost), 0, 0, 0, 0, 1, false); !recorded {
+				return 0
+			}
 		}
 		return cost
 	}
@@ -613,6 +681,11 @@ func (s *Store) RecordUsage(apiKeyOrID, alias, model string, failed bool, detail
 		Found:            detail.InputTokens > 0 || detail.OutputTokens > 0,
 	}
 	if !usage.Found {
+		if usageLedger != nil {
+			// No billable tokens still settles an in-flight reservation and marks
+			// the delivery id so a retry cannot later charge it.
+			usageLedger.RecordCostMicros(key.ID, requestID, resolved, 0, 0, 0, 0, 0, 0, false)
+		}
 		return 0
 	}
 	// Cache-aware billing: the usage.handle detail carries cache-read / cached
@@ -650,7 +723,9 @@ func (s *Store) RecordUsage(apiKeyOrID, alias, model string, failed bool, detail
 		// reports usage volume and hit-rate; USD stays 0. Previously `cost > 0`
 		// dropped free-but-priced requests entirely, hiding their volume.
 		// callCount=1: this was a successful, token-billed request.
-		usageLedger.RecordCost(key.ID, resolved, cost, cacheCost, cacheReadTokens, nonCacheInput, int64(detail.OutputTokens), 1)
+		if recorded := usageLedger.RecordCostMicros(key.ID, requestID, resolved, usdToMicros(cost), usdToMicros(cacheCost), cacheReadTokens, nonCacheInput, int64(detail.OutputTokens), 1, false); !recorded {
+			return 0
+		}
 	}
 	return cost
 }
@@ -1326,10 +1401,14 @@ func (s *Store) usageSnapshotLocked() map[string]*UsageState {
 // (reconfigure / shutdown).
 func (s *Store) FlushUsage() error {
 	s.mu.Lock()
-	usage := s.usageSnapshotLocked()
+	ledger := s.usage
 	path := s.statePath
 	s.mu.Unlock()
-	if path == "" {
+	if path == "" || ledger == nil {
+		return nil
+	}
+	usage, generation, dirty := ledger.snapshotForFlush()
+	if !dirty {
 		return nil
 	}
 	// Bug 3 fix: persist only the usage ledger, preserving the key list already
@@ -1337,7 +1416,28 @@ func (s *Store) FlushUsage() error {
 	// API (UpsertKey/DeleteKey/RotateKey), so the periodic flush must not
 	// overwrite them with an in-memory snapshot that could be stale or
 	// truncated.
-	return s.saveUsageOnly(path, usage)
+	if err := s.saveUsageOnly(path, usage); err != nil {
+		s.recordUsageFlushError(err)
+		return err
+	}
+	ledger.markPersisted(generation)
+	s.recordUsageFlushSuccess()
+	return nil
+}
+
+func (s *Store) recordUsageFlushSuccess() {
+	s.flushMu.Lock()
+	s.lastUsageFlushAt = time.Now().UTC()
+	s.lastUsageFlushError = ""
+	s.usageFlushFailures = 0
+	s.flushMu.Unlock()
+}
+
+func (s *Store) recordUsageFlushError(err error) {
+	s.flushMu.Lock()
+	s.lastUsageFlushError = err.Error()
+	s.usageFlushFailures++
+	s.flushMu.Unlock()
 }
 
 func (s *Store) saveState(path string, keys []KeyConfig, usage map[string]*UsageState, aliases []AliasMapping, rules []ClassifyRule) error {
@@ -1383,7 +1483,10 @@ func (s *Store) StopUsageFlusher() {
 		f.stop()
 		<-f.doneCh
 	}
-	_ = s.FlushUsage()
+	if err := s.FlushUsage(); err != nil {
+		// FlushUsage already records the failure for the management status API.
+		return
+	}
 }
 
 type usageFlusher struct {
@@ -1395,14 +1498,29 @@ type usageFlusher struct {
 
 func (f *usageFlusher) loop() {
 	defer close(f.doneCh)
-	t := time.NewTicker(usageFlushInterval)
+	delay := usageFlushInterval
+	t := time.NewTimer(delay)
 	defer t.Stop()
 	for {
 		select {
 		case <-f.stopCh:
 			return
 		case <-t.C:
-			_ = f.store.FlushUsage()
+			if err := f.store.FlushUsage(); err != nil {
+				// Retry quickly with exponential backoff, capped at the normal
+				// interval. The error remains visible through Store.Status.
+				if delay == usageFlushInterval {
+					delay = time.Second
+				} else {
+					delay *= 2
+					if delay > usageFlushInterval {
+						delay = usageFlushInterval
+					}
+				}
+			} else {
+				delay = usageFlushInterval
+			}
+			t.Reset(delay)
 		}
 	}
 }
@@ -1415,16 +1533,25 @@ func (s *Store) Status() map[string]any {
 	limiter := s.limiter
 	usage := s.usage
 	s.mu.RUnlock()
+	s.flushMu.RLock()
+	lastFlushAt := s.lastUsageFlushAt
+	lastFlushError := s.lastUsageFlushError
+	flushFailures := s.usageFlushFailures
+	s.flushMu.RUnlock()
 	rpmUsage := map[string]int{}
 	if limiter != nil {
 		rpmUsage = limiter.Snapshot()
 	}
 	out := map[string]any{
-		"enabled":    enabled,
-		"state_file": statePath,
-		"key_count":  len(keys),
-		"rpm_usage":  rpmUsage,
-		"usage":      usageSummaryForKeys(usage, keys),
+		"enabled":                enabled,
+		"state_file":             statePath,
+		"key_count":              len(keys),
+		"rpm_usage":              rpmUsage,
+		"usage":                  usageSummaryForKeys(usage, keys),
+		"usage_dirty":            usage != nil && usage.isDirty(),
+		"last_usage_flush_at":    lastFlushAt,
+		"last_usage_flush_error": lastFlushError,
+		"usage_flush_failures":   flushFailures,
 	}
 	return out
 }

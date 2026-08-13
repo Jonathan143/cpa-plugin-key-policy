@@ -176,6 +176,10 @@ type UsageState struct {
 	Weekly  UsageWindow                  `json:"weekly"`
 	Total   UsageWindow                  `json:"total"`
 	ByAlias map[string]AliasUsageWindows `json:"by_alias,omitempty"`
+	// ProcessedRequests is a bounded, persistent idempotency set for
+	// usage.handle deliveries. CPA may retry a notification; retaining the
+	// request id prevents the same completed request from being billed twice.
+	ProcessedRequests map[string]time.Time `json:"processed_requests,omitempty"`
 }
 
 // AliasUsageWindows holds daily, rolling-weekly, and lifetime usage for a
@@ -195,21 +199,26 @@ type AliasUsageWindows struct {
 // are skipped rather than failing the whole load.
 func (s *UsageState) UnmarshalJSON(raw []byte) error {
 	var p struct {
-		Daily   UsageWindow     `json:"daily"`
-		Weekly  UsageWindow     `json:"weekly"`
-		Total   *UsageWindow    `json:"total"`
-		ByAlias json.RawMessage `json:"by_alias,omitempty"`
+		Daily             UsageWindow          `json:"daily"`
+		Weekly            UsageWindow          `json:"weekly"`
+		Total             *UsageWindow         `json:"total"`
+		ByAlias           json.RawMessage      `json:"by_alias,omitempty"`
+		ProcessedRequests map[string]time.Time `json:"processed_requests,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return err
 	}
 	s.Daily = p.Daily
 	s.Weekly = p.Weekly
+	s.Daily.normalizeMoney()
+	s.Weekly.normalizeMoney()
 	if p.Total != nil {
 		s.Total = *p.Total
 	} else {
 		s.Total = largerUsageWindow(p.Daily, p.Weekly)
 	}
+	s.Total.normalizeMoney()
+	s.ProcessedRequests = p.ProcessedRequests
 	s.ByAlias = make(map[string]AliasUsageWindows)
 	if len(p.ByAlias) == 0 || string(p.ByAlias) == "null" {
 		return nil
@@ -230,11 +239,14 @@ func (s *UsageState) UnmarshalJSON(raw []byte) error {
 			}
 			if err := json.Unmarshal(rawEntry, &shaped); err == nil {
 				w := AliasUsageWindows{Daily: shaped.Daily, Weekly: shaped.Weekly}
+				w.Daily.normalizeMoney()
+				w.Weekly.normalizeMoney()
 				if shaped.Total != nil {
 					w.Total = *shaped.Total
 				} else {
 					w.Total = largerUsageWindow(w.Daily, w.Weekly)
 				}
+				w.Total.normalizeMoney()
 				s.ByAlias[alias] = w
 			}
 			continue
@@ -242,6 +254,7 @@ func (s *UsageState) UnmarshalJSON(raw []byte) error {
 		// Legacy single-window format: migrate into Daily and seed Total.
 		var w UsageWindow
 		if err := json.Unmarshal(rawEntry, &w); err == nil {
+			w.normalizeMoney()
 			s.ByAlias[alias] = AliasUsageWindows{Daily: w, Total: w}
 		}
 	}
@@ -249,14 +262,18 @@ func (s *UsageState) UnmarshalJSON(raw []byte) error {
 }
 
 func largerUsageWindow(a, b UsageWindow) UsageWindow {
+	a.normalizeMoney()
+	b.normalizeMoney()
 	out := a
-	if b.TotalUSD > out.TotalUSD {
+	if b.TotalMicros > out.TotalMicros {
+		out.TotalMicros = b.TotalMicros
 		out.TotalUSD = b.TotalUSD
 	}
 	if b.CacheReadTokens > out.CacheReadTokens {
 		out.CacheReadTokens = b.CacheReadTokens
 	}
-	if b.CacheCostUSD > out.CacheCostUSD {
+	if b.CacheCostMicros > out.CacheCostMicros {
+		out.CacheCostMicros = b.CacheCostMicros
 		out.CacheCostUSD = b.CacheCostUSD
 	}
 	if b.InputTokens > out.InputTokens {
@@ -300,10 +317,15 @@ func hasJSONKey(raw json.RawMessage, key string) bool {
 //     Used as the denominator of hit-rate = cacheRead /
 //     (cacheRead + InputTokens).
 type UsageWindow struct {
-	TotalUSD        float64   `json:"total_usd"`
+	TotalUSD float64 `json:"total_usd"`
+	// TotalMicros is the authoritative monetary value (1 USD = 1,000,000
+	// micros). TotalUSD remains serialized for backward compatibility and API
+	// display, but all accounting and quota comparisons use this integer.
+	TotalMicros     int64     `json:"total_micros,omitempty"`
 	WindowStart     time.Time `json:"window_start,omitempty"`
 	CacheReadTokens int64     `json:"cache_read_tokens,omitempty"`
 	CacheCostUSD    float64   `json:"cache_cost_usd,omitempty"`
+	CacheCostMicros int64     `json:"cache_cost_micros,omitempty"`
 	InputTokens     int64     `json:"input_tokens,omitempty"`
 	// OutputTokens is the non-cache completion-token count billed in this
 	// window (tokens charged at the output price). Reported for display on the
@@ -314,6 +336,17 @@ type UsageWindow struct {
 	// requests do NOT increment it (a per-call charge only applies to HTTP-200
 	// outcomes). Reported for display only; not used for limit enforcement.
 	CallCount int64 `json:"call_count,omitempty"`
+}
+
+func (w *UsageWindow) normalizeMoney() {
+	if w.TotalMicros == 0 && w.TotalUSD != 0 {
+		w.TotalMicros = usdToMicros(w.TotalUSD)
+	}
+	if w.CacheCostMicros == 0 && w.CacheCostUSD != 0 {
+		w.CacheCostMicros = usdToMicros(w.CacheCostUSD)
+	}
+	w.TotalUSD = microsToUSD(w.TotalMicros)
+	w.CacheCostUSD = microsToUSD(w.CacheCostMicros)
 }
 
 type State struct {

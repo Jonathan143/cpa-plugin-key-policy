@@ -189,6 +189,12 @@ type ResponseInterceptRequest struct {
 // entry point: the host never invokes response.intercept_after on streaming
 // responses, so the plugin cannot rely on that alone to bill streams.
 type UsageHandleRequest struct {
+	// RequestID identifies one completed upstream request. CPA versions may
+	// expose it as RequestID or ID; handleUsage accepts both. When present the
+	// policy ledger persists it for idempotent retry handling.
+	RequestID      string `json:"RequestID,omitempty"`
+	RequestIDSnake string `json:"request_id,omitempty"`
+	ID             string `json:"ID,omitempty"`
 	// Model is the resolved upstream model id.
 	Model string `json:"Model"`
 	// Alias is the client-requested model name (what the caller passed in the

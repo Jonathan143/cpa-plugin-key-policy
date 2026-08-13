@@ -1,16 +1,36 @@
 package policy
 
 import (
+	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	dayWindow          = 24 * time.Hour
-	weekWindow         = 7 * 24 * time.Hour
-	usageFlushInterval = 15 * time.Second
+	dayWindow           = 24 * time.Hour
+	weekWindow          = 7 * 24 * time.Hour
+	usageFlushInterval  = 15 * time.Second
+	reservationTTL      = 10 * time.Minute
+	idempotencyTTL      = 24 * time.Hour
+	maxRequestIDsPerKey = 4096
 )
+
+const microsPerUSD int64 = 1_000_000
+
+func usdToMicros(usd float64) int64 {
+	return int64(math.Round(usd * float64(microsPerUSD)))
+}
+
+func microsToUSD(micros int64) float64 {
+	return float64(micros) / float64(microsPerUSD)
+}
+
+type usageReservation struct {
+	amountMicros int64
+	createdAt    time.Time
+}
 
 // usageLedger tracks per-key dollar usage with a daily window (UTC midnight
 // reset), a rolling 7-day weekly window, and a lifetime total that only resets
@@ -20,17 +40,27 @@ const (
 // persists it to the state JSON (see Store.persistUsage). Reads for limit
 // enforcement (Authenticate) and reporting (keys list) go through here.
 type usageLedger struct {
-	mu  sync.Mutex
-	now func() time.Time
+	mu         sync.Mutex
+	now        func() time.Time
+	dirty      bool
+	generation uint64
 	// usage by key id; nil entry allowed when a key has no usage recorded yet.
 	entries map[string]*UsageState
+	// Reservations are runtime-only estimates held between authentication and
+	// usage.handle settlement. They prevent concurrent requests from all seeing
+	// the same remaining budget. Queues are keyed by key id + alias.
+	reservations map[string][]usageReservation
 }
 
 func newUsageLedger(now func() time.Time) *usageLedger {
 	if now == nil {
 		now = time.Now
 	}
-	return &usageLedger{now: now, entries: make(map[string]*UsageState)}
+	return &usageLedger{
+		now:          now,
+		entries:      make(map[string]*UsageState),
+		reservations: make(map[string][]usageReservation),
+	}
 }
 
 // loadFromState seeds the ledger from a loaded state file (restart recovery).
@@ -38,12 +68,21 @@ func (l *usageLedger) loadFromState(usage map[string]*UsageState) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.entries = make(map[string]*UsageState, len(usage))
+	l.reservations = make(map[string][]usageReservation)
 	for id, st := range usage {
 		if st == nil {
 			continue
 		}
-		cp := *st
-		l.entries[id] = &cp
+		l.entries[id] = cloneUsageState(st)
+	}
+	// Rewrite loaded usage once. This persists any legacy JSON migrations
+	// performed by UsageState.UnmarshalJSON (including micro-dollar fields and
+	// the multi-window alias shape); subsequent clean intervals are skipped.
+	l.dirty = len(l.entries) > 0
+	if l.dirty {
+		l.generation = 1
+	} else {
+		l.generation = 0
 	}
 }
 
@@ -56,20 +95,75 @@ func (l *usageLedger) snapshot() map[string]*UsageState {
 		if st == nil {
 			continue
 		}
-		cp := *st
-		out[id] = &cp
+		out[id] = cloneUsageState(st)
 	}
 	return out
+}
+
+func cloneUsageState(st *UsageState) *UsageState {
+	if st == nil {
+		return nil
+	}
+	cp := *st
+	cp.ByAlias = make(map[string]AliasUsageWindows, len(st.ByAlias))
+	for alias, usage := range st.ByAlias {
+		cp.ByAlias[alias] = usage
+	}
+	cp.ProcessedRequests = make(map[string]time.Time, len(st.ProcessedRequests))
+	for requestID, processedAt := range st.ProcessedRequests {
+		cp.ProcessedRequests[requestID] = processedAt
+	}
+	return &cp
+}
+
+func (l *usageLedger) snapshotForFlush() (map[string]*UsageState, uint64, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.dirty {
+		return nil, l.generation, false
+	}
+	out := make(map[string]*UsageState, len(l.entries))
+	for id, st := range l.entries {
+		if st != nil {
+			out[id] = cloneUsageState(st)
+		}
+	}
+	return out, l.generation, true
+}
+
+func (l *usageLedger) markPersisted(generation uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.generation == generation {
+		l.dirty = false
+	}
+}
+
+func (l *usageLedger) isDirty() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.dirty
+}
+
+func (l *usageLedger) markDirtyLocked() {
+	l.dirty = true
+	l.generation++
 }
 
 func (l *usageLedger) entryLocked(id string) *UsageState {
 	st := l.entries[id]
 	if st == nil {
-		st = &UsageState{ByAlias: make(map[string]AliasUsageWindows)}
+		st = &UsageState{
+			ByAlias:           make(map[string]AliasUsageWindows),
+			ProcessedRequests: make(map[string]time.Time),
+		}
 		l.entries[id] = st
 	}
 	if st.ByAlias == nil {
 		st.ByAlias = make(map[string]AliasUsageWindows)
+	}
+	if st.ProcessedRequests == nil {
+		st.ProcessedRequests = make(map[string]time.Time)
 	}
 	return st
 }
@@ -135,19 +229,50 @@ func sameDay(a, b time.Time) bool {
 // at the regular input price (the denominator partner for hit-rate);
 // outputTokens is the completion-token count charged at the output price.
 func (l *usageLedger) RecordCost(id, alias string, amount, cacheCost float64, cacheReadTokens, inputTokens, outputTokens int64, callCount int64) {
+	l.RecordCostMicros(id, "", alias, usdToMicros(amount), usdToMicros(cacheCost), cacheReadTokens, inputTokens, outputTokens, callCount, false)
+}
+
+// RecordCostMicros settles one pending reservation and records a completed
+// request using integer micro-dollars. When requestID is non-empty, duplicate
+// deliveries are ignored. failed releases the reservation and records the id,
+// but does not add cost or counters.
+func (l *usageLedger) RecordCostMicros(id, requestID, alias string, amountMicros, cacheCostMicros int64, cacheReadTokens, inputTokens, outputTokens int64, callCount int64, failed bool) bool {
 	if id == "" {
-		return
+		return false
 	}
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	st := l.entryLocked(id)
+	requestID = strings.TrimSpace(requestID)
+	if requestID != "" {
+		l.pruneProcessedRequestsLocked(st, now)
+		if _, duplicate := st.ProcessedRequests[requestID]; duplicate {
+			return false
+		}
+		st.ProcessedRequests[requestID] = now.UTC()
+	}
+	l.releaseReservationLocked(id, alias, now)
+	if failed {
+		if requestID != "" {
+			l.markDirtyLocked()
+		}
+		return true
+	}
+	if amountMicros == 0 && cacheCostMicros == 0 && cacheReadTokens == 0 && inputTokens == 0 && outputTokens == 0 && callCount == 0 {
+		// Reservation-only settlement. Persist only when an idempotency id was
+		// added; otherwise there is no durable usage change to flush.
+		if requestID != "" {
+			l.markDirtyLocked()
+		}
+		return true
+	}
 	l.ensureDailyWindowLocked(st, now)
 	l.ensureWeeklyWindowLocked(st, now)
 	l.ensureTotalWindowLocked(&st.Total, now)
-	st.Daily.TotalUSD += amount
-	st.Weekly.TotalUSD += amount
-	st.Total.TotalUSD += amount
+	addMoney(&st.Daily, amountMicros, cacheCostMicros)
+	addMoney(&st.Weekly, amountMicros, cacheCostMicros)
+	addMoney(&st.Total, amountMicros, cacheCostMicros)
 	st.Daily.CallCount += callCount
 	st.Weekly.CallCount += callCount
 	st.Total.CallCount += callCount
@@ -155,11 +280,6 @@ func (l *usageLedger) RecordCost(id, alias string, amount, cacheCost float64, ca
 		st.Daily.CacheReadTokens += cacheReadTokens
 		st.Weekly.CacheReadTokens += cacheReadTokens
 		st.Total.CacheReadTokens += cacheReadTokens
-	}
-	if cacheCost > 0 {
-		st.Daily.CacheCostUSD += cacheCost
-		st.Weekly.CacheCostUSD += cacheCost
-		st.Total.CacheCostUSD += cacheCost
 	}
 	if inputTokens > 0 {
 		st.Daily.InputTokens += inputTokens
@@ -176,18 +296,15 @@ func (l *usageLedger) RecordCost(id, alias string, amount, cacheCost float64, ca
 	l.ensureAliasWindowLocked(&aliasEntry.Daily, true, now)
 	l.ensureAliasWindowLocked(&aliasEntry.Weekly, false, now)
 	l.ensureTotalWindowLocked(&aliasEntry.Total, now)
-	aliasEntry.Daily.TotalUSD += amount
-	aliasEntry.Weekly.TotalUSD += amount
-	aliasEntry.Total.TotalUSD += amount
+	addMoney(&aliasEntry.Daily, amountMicros, cacheCostMicros)
+	addMoney(&aliasEntry.Weekly, amountMicros, cacheCostMicros)
+	addMoney(&aliasEntry.Total, amountMicros, cacheCostMicros)
 	aliasEntry.Daily.CallCount += callCount
 	aliasEntry.Weekly.CallCount += callCount
 	aliasEntry.Total.CallCount += callCount
 	aliasEntry.Daily.CacheReadTokens += cacheReadTokens
 	aliasEntry.Weekly.CacheReadTokens += cacheReadTokens
 	aliasEntry.Total.CacheReadTokens += cacheReadTokens
-	aliasEntry.Daily.CacheCostUSD += cacheCost
-	aliasEntry.Weekly.CacheCostUSD += cacheCost
-	aliasEntry.Total.CacheCostUSD += cacheCost
 	aliasEntry.Daily.InputTokens += inputTokens
 	aliasEntry.Weekly.InputTokens += inputTokens
 	aliasEntry.Total.InputTokens += inputTokens
@@ -195,6 +312,139 @@ func (l *usageLedger) RecordCost(id, alias string, amount, cacheCost float64, ca
 	aliasEntry.Weekly.OutputTokens += outputTokens
 	aliasEntry.Total.OutputTokens += outputTokens
 	st.ByAlias[alias] = aliasEntry
+	l.markDirtyLocked()
+	return true
+}
+
+func addMoney(w *UsageWindow, amountMicros, cacheCostMicros int64) {
+	w.normalizeMoney()
+	w.TotalMicros += amountMicros
+	w.CacheCostMicros += cacheCostMicros
+	w.TotalUSD = microsToUSD(w.TotalMicros)
+	w.CacheCostUSD = microsToUSD(w.CacheCostMicros)
+}
+
+func reservationKey(id, alias string) string {
+	return strings.ToLower(strings.TrimSpace(id)) + "\x00" + strings.ToLower(strings.TrimSpace(alias))
+}
+
+func (l *usageLedger) pruneReservationsLocked(now time.Time) {
+	for key, queue := range l.reservations {
+		kept := queue[:0]
+		for _, reservation := range queue {
+			if now.Sub(reservation.createdAt) < reservationTTL && !now.Before(reservation.createdAt) {
+				kept = append(kept, reservation)
+			}
+		}
+		if len(kept) == 0 {
+			delete(l.reservations, key)
+		} else {
+			l.reservations[key] = kept
+		}
+	}
+}
+
+func (l *usageLedger) releaseReservationLocked(id, alias string, now time.Time) {
+	l.pruneReservationsLocked(now)
+	key := reservationKey(id, alias)
+	queue := l.reservations[key]
+	if len(queue) == 0 {
+		return
+	}
+	if len(queue) == 1 {
+		delete(l.reservations, key)
+		return
+	}
+	// usage.handle completions can arrive out of order and currently do not
+	// carry the authentication reservation id. Release the smallest estimate;
+	// retaining larger reservations is conservative and avoids temporarily
+	// under-reserving the key when a cheap request finishes before an expensive
+	// one. Any harmless over-reservation disappears as the remaining requests
+	// settle or reach reservationTTL.
+	smallest := 0
+	for i := 1; i < len(queue); i++ {
+		if queue[i].amountMicros < queue[smallest].amountMicros {
+			smallest = i
+		}
+	}
+	queue = append(queue[:smallest], queue[smallest+1:]...)
+	l.reservations[key] = queue
+}
+
+func (l *usageLedger) reservedMicrosLocked(id string) int64 {
+	prefix := strings.ToLower(strings.TrimSpace(id)) + "\x00"
+	var total int64
+	for key, queue := range l.reservations {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		for _, reservation := range queue {
+			total += reservation.amountMicros
+		}
+	}
+	return total
+}
+
+// Reserve checks actual usage plus all in-flight estimates atomically, then
+// appends a reservation for the request. A zero estimate still performs the
+// at-limit check but does not create a queue entry.
+func (l *usageLedger) Reserve(key KeyConfig, alias string, amountMicros int64) string {
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pruneReservationsLocked(now)
+	st := l.entryLocked(key.ID)
+	l.ensureDailyWindowLocked(st, now)
+	l.ensureWeeklyWindowLocked(st, now)
+	reserved := l.reservedMicrosLocked(key.ID)
+	checks := []struct {
+		limit  float64
+		used   int64
+		reason string
+	}{
+		{key.DailyLimitUSD, st.Daily.TotalMicros, "daily_exceeded"},
+		{key.WeeklyLimitUSD, st.Weekly.TotalMicros, "weekly_exceeded"},
+		{key.TotalLimitUSD, st.Total.TotalMicros, "total_exceeded"},
+	}
+	for _, check := range checks {
+		if check.limit <= 0 {
+			continue
+		}
+		limitMicros := usdToMicros(check.limit)
+		if check.used+reserved >= limitMicros || check.used+reserved+amountMicros > limitMicros {
+			return check.reason
+		}
+	}
+	if amountMicros > 0 {
+		reservation := usageReservation{amountMicros: amountMicros, createdAt: now}
+		queueKey := reservationKey(key.ID, alias)
+		l.reservations[queueKey] = append(l.reservations[queueKey], reservation)
+	}
+	return ""
+}
+
+func (l *usageLedger) pruneProcessedRequestsLocked(st *UsageState, now time.Time) {
+	cutoff := now.Add(-idempotencyTTL)
+	for requestID, processedAt := range st.ProcessedRequests {
+		if processedAt.Before(cutoff) || now.Before(processedAt) {
+			delete(st.ProcessedRequests, requestID)
+		}
+	}
+	if len(st.ProcessedRequests) < maxRequestIDsPerKey {
+		return
+	}
+	type processedRequest struct {
+		id string
+		at time.Time
+	}
+	items := make([]processedRequest, 0, len(st.ProcessedRequests))
+	for id, at := range st.ProcessedRequests {
+		items = append(items, processedRequest{id: id, at: at})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].at.Before(items[j].at) })
+	for i := 0; i <= len(items)-maxRequestIDsPerKey; i++ {
+		delete(st.ProcessedRequests, items[i].id)
+	}
 }
 
 // UsageSummary is what the keys-list API reports for a key. Daily and weekly
@@ -248,11 +498,11 @@ func (l *usageLedger) Summary(key KeyConfig) UsageSummary {
 	}
 	l.ensureDailyWindowLocked(&ensureSt, now)
 	l.ensureWeeklyWindowLocked(&ensureSt, now)
-	summary.DailyUSD = ensureSt.Daily.TotalUSD
-	summary.WeeklyUSD = ensureSt.Weekly.TotalUSD
-	summary.TotalUSD = ensureSt.Total.TotalUSD
-	summary.DailyCacheCostUSD = ensureSt.Daily.CacheCostUSD
-	summary.WeeklyCacheCostUSD = ensureSt.Weekly.CacheCostUSD
+	summary.DailyUSD = microsToUSD(ensureSt.Daily.TotalMicros)
+	summary.WeeklyUSD = microsToUSD(ensureSt.Weekly.TotalMicros)
+	summary.TotalUSD = microsToUSD(ensureSt.Total.TotalMicros)
+	summary.DailyCacheCostUSD = microsToUSD(ensureSt.Daily.CacheCostMicros)
+	summary.WeeklyCacheCostUSD = microsToUSD(ensureSt.Weekly.CacheCostMicros)
 	summary.DailyCacheReadTokens = ensureSt.Daily.CacheReadTokens
 	summary.WeeklyCacheReadTokens = ensureSt.Weekly.CacheReadTokens
 	summary.DailyInputTokens = ensureSt.Daily.InputTokens
@@ -273,13 +523,13 @@ func (l *usageLedger) OverLimit(key KeyConfig) (string, UsageSummary) {
 		return "", UsageSummary{}
 	}
 	s := l.Summary(key)
-	if key.DailyLimitUSD > 0 && s.DailyUSD >= key.DailyLimitUSD {
+	if key.DailyLimitUSD > 0 && usdToMicros(s.DailyUSD) >= usdToMicros(key.DailyLimitUSD) {
 		return "daily_exceeded", s
 	}
-	if key.WeeklyLimitUSD > 0 && s.WeeklyUSD >= key.WeeklyLimitUSD {
+	if key.WeeklyLimitUSD > 0 && usdToMicros(s.WeeklyUSD) >= usdToMicros(key.WeeklyLimitUSD) {
 		return "weekly_exceeded", s
 	}
-	if key.TotalLimitUSD > 0 && s.TotalUSD >= key.TotalLimitUSD {
+	if key.TotalLimitUSD > 0 && usdToMicros(s.TotalUSD) >= usdToMicros(key.TotalLimitUSD) {
 		return "total_exceeded", s
 	}
 	return "", UsageSummary{}
@@ -290,6 +540,13 @@ func (l *usageLedger) resetUsage(id string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.entries, id)
+	prefix := strings.ToLower(strings.TrimSpace(id)) + "\x00"
+	for key := range l.reservations {
+		if strings.HasPrefix(key, prefix) {
+			delete(l.reservations, key)
+		}
+	}
+	l.markDirtyLocked()
 }
 
 // AliasUsageEntry is one row of the per-alias usage breakdown reported by the

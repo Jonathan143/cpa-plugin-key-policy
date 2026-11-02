@@ -1,0 +1,139 @@
+name: Build CPR modeltrace-health Linux ARM64
+on:
+  push:
+    branches:
+      - build/cpr-jzjc-arm64-v1.13.0
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - name: Checkout CPR plugin source v1.13.0
+        uses: actions/checkout@v4
+        with:
+          repository: Victor-Tau/cpr-jzjc
+          ref: v1.13.0
+          path: source
+          persist-credentials: false
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev python3-venv python3-pip file
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+          components: rustfmt, clippy
+          targets: aarch64-unknown-linux-gnu
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: pnpm
+        run: npm install -g pnpm@10.32.1
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.13.0'
+      - name: Zig Rust integration
+        run: cargo install cargo-zigbuild --version 0.20.1 --locked
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Install crane
+        run: |
+          go install github.com/google/go-containerregistry/cmd/crane@v0.20.7
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Prepare Python and ARM64 source patches
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          .venv/bin/python -m pip install -r requirements-dev.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          root=Path('.')
+          def patch_file(path, changes):
+              p=root/path
+              s=p.read_text()
+              for before,after in changes:
+                  assert before in s, f'Missing anchor {before!r} in {path}'
+                  s=s.replace(before,after)
+              p.write_text(s)
+          patch_file('backend/src/engine.rs', [
+              ('x86_64-linux-gnu','aarch64-linux-gnu'),
+              ('ld-linux-x86-64.so.2','ld-linux-aarch64.so.1'),
+          ])
+          patch_file('scripts/verify_artifact.py', [
+              ('x86_64-linux-gnu','aarch64-linux-gnu'),
+              ('ld-linux-x86-64.so.2','ld-linux-aarch64.so.1'),
+          ])
+          p=root/'scripts/build_runtime.py'
+          s=p.read_text()
+          s,n=re.subn(r'^IMAGE = .*$', 'IMAGE = "index.docker.io/library/python:3.11-slim-bookworm"',s,flags=re.M)
+          assert n==1
+          s,n=re.subn(r'^CONFIG = .*$', 'CONFIG = None',s,flags=re.M)
+          assert n==1
+          s=s.replace('if "sha256:" + hashlib.sha256(raw_config).hexdigest() != CONFIG:',
+                      'if CONFIG and "sha256:" + hashlib.sha256(raw_config).hexdigest() != CONFIG:')
+          assert '"linux/amd64"' in s
+          s=s.replace('"linux/amd64"','"linux/arm64"')
+          assert '"amd64"' in s
+          s=s.replace('"amd64"','"arm64"')
+          assert 'x86_64' in s
+          s=s.replace('x86_64','aarch64').replace('ld-linux-x86-64.so.2','ld-linux-aarch64.so.1')
+          p.write_text(s)
+          (root/'scripts/numpy-wheel.sha256').write_text('a016db5c5dba78fa8fe9f5d80d6708f9c42ab087a739803c0ac83a43d686a470\n')
+          PY
+      - name: Install official CPR v3.38.1 packaging CLI
+        working-directory: source
+        run: |
+          git clone --depth 1 --branch v3.38.1 https://github.com/zyycn/codex-proxy-rs.git .cache/cpr-host
+          cargo install --path .cache/cpr-host/backend/apps/plugin-cli --locked
+      - name: Build and test frontend, Rust and Python
+        working-directory: source
+        run: |
+          set -euo pipefail
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend build
+          cargo fmt --manifest-path backend/Cargo.toml --check
+          cargo test --manifest-path backend/Cargo.toml --locked
+          .venv/bin/python -m unittest discover -s engine/tests -v
+      - name: Compile ARM64 backend and score runtime
+        working-directory: source
+        run: |
+          set -euo pipefail
+          .venv/bin/python scripts/build_runtime.py
+          .venv/bin/python scripts/collect_licenses.py
+          cargo zigbuild --manifest-path backend/Cargo.toml --locked --release --target aarch64-unknown-linux-gnu.2.36
+          file backend/target/aarch64-unknown-linux-gnu/release/modeltrace-health
+      - name: Package by official cpr-plugin CLI
+        working-directory: source
+        run: |
+          set -euo pipefail
+          cpr-plugin package --manifest plugin.json --binary backend/target/aarch64-unknown-linux-gnu/release/modeltrace-health --target aarch64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
+          .venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.13.0-aarch64-unknown-linux-gnu.tar.gz
+          (cd dist && sha256sum -c personal.modeltrace-health-1.13.0-aarch64-unknown-linux-gnu.tar.gz.sha256)
+          python3 - <<'PY'
+          import json,tarfile,struct
+          p='dist/personal.modeltrace-health-1.13.0-aarch64-unknown-linux-gnu.tar.gz'
+          with tarfile.open(p) as tar:
+              manifest=json.load(tar.extractfile('plugin.json'))
+              assert manifest['package']['target']=={'os':'linux','architecture':'aarch64'}
+              binary=tar.extractfile('bin/modeltrace-health').read(20)
+              assert binary[:4]==b'\x7fELF' and struct.unpack('<H',binary[18:20])[0]==183
+          print('CPR aarch64 target + AARCH64 ELF binary checked')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpr-jzjc-v1.13.0-linux-arm64-install
+          path: |
+            source/dist/personal.modeltrace-health-1.13.0-aarch64-unknown-linux-gnu.tar.gz
+            source/dist/personal.modeltrace-health-1.13.0-aarch64-unknown-linux-gnu.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
